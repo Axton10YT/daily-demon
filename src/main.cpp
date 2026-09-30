@@ -14,6 +14,7 @@
 #include <Geode/modify/DailyLevelPage.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
+#include <ctime>
 
 using namespace geode::prelude;
 
@@ -25,6 +26,8 @@ namespace {
 	bool g_ddMode = false;
 	int g_ddLevelID = 0;
 	int g_ddDailyID = 0;
+	int g_ddNumber = 0;          // "Daily Demon #N"
+	std::time_t g_ddEndsAt = 0;  // when today's demon expires (unix time)
 
 	// Geode v5: web requests are futures; a TaskHolder aborts the task when replaced/destroyed
 	// and runs the callback on the main thread.
@@ -70,7 +73,103 @@ namespace {
 		);
 	}
 
+	// The popup borrows the game's Event slot. Stash the real Event state while it is open
+	// (so cached Event data never shows up here, and ours never leaks into the real Event button).
+	struct SavedEvent { int id = 0, timeLeft = 0, active = 0; bool has = false; } g_saved;
+
+	void beginDDMode() {
+		auto mgr = GameLevelManager::sharedState();
+		if (!g_saved.has) {
+			g_saved = { mgr->m_eventID, mgr->m_eventTimeLeft, mgr->m_activeEventID, true };
+		}
+		mgr->m_eventID = 0;
+		mgr->m_eventTimeLeft = 0;
+		mgr->m_activeEventID = 0;
+		g_ddLevelID = 0;
+		g_ddDailyID = 0;
+		g_ddNumber = 0;
+		g_ddEndsAt = 0;
+		g_ddMode = true;
+	}
+
+	void endDDMode() {
+		g_ddMode = false;
+		if (g_saved.has) {
+			auto mgr = GameLevelManager::sharedState();
+			mgr->m_eventID = g_saved.id;
+			mgr->m_eventTimeLeft = g_saved.timeLeft;
+			mgr->m_activeEventID = g_saved.active;
+			g_saved.has = false;
+		}
+	}
+
+	std::string lower(std::string s) {
+		for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return s;
+	}
+
+	bool startsWith(std::string const& s, char const* prefix) {
+		return s.rfind(prefix, 0) == 0;
+	}
+
+	std::string countdownText() {
+		long left = static_cast<long>(g_ddEndsAt - std::time(nullptr));
+		if (left < 0) left = 0;
+		return fmt::format("New Daily Demon in: {:02}:{:02}:{:02}", left / 3600, (left / 60) % 60, left % 60);
+	}
+
+	void collectLabels(CCNode* node, std::vector<CCLabelBMFont*>& out) {
+		if (!node) return;
+		for (auto child : CCArrayExt<CCNode*>(node->getChildren())) {
+			if (auto lbl = typeinfo_cast<CCLabelBMFont*>(child)) out.push_back(lbl);
+			collectLabels(child, out);
+		}
+	}
+
+	void hideNear(CCNode* node, CCPoint worldPos) {
+		if (!node) return;
+		for (auto child : CCArrayExt<CCNode*>(node->getChildren())) {
+			bool clickable = typeinfo_cast<CCMenuItem*>(child) != nullptr;
+			if (clickable && child->isVisible()) {
+				auto wp = child->getParent()->convertToWorldSpace(child->getPosition());
+				float dx = wp.x - worldPos.x, dy = wp.y - worldPos.y;
+				if (dx > 0.f && dx < 110.f && std::abs(dy) < 30.f) {
+					child->setVisible(false);
+					if (auto item = typeinfo_cast<CCMenuItem*>(child)) item->setEnabled(false);
+					continue;
+				}
+			}
+			hideNear(child, worldPos);
+		}
+	}
+
+	// The popup is the Event page, so strip/relabel everything that says "Event".
+	void tidyDDPage(CCNode* page) {
+		std::vector<CCLabelBMFont*> labels;
+		collectLabels(page, labels);
+		for (auto lbl : labels) {
+			std::string t = lbl->getString();
+			std::string l = lower(t);
+			if (startsWith(t, "Event #")) {
+				lbl->setString(fmt::format("Daily Demon #{}", g_ddNumber > 0 ? g_ddNumber : 1).c_str());
+			} else if (startsWith(t, "Current:")) {
+				lbl->setVisible(false);
+			} else if (l == "bonus:") {
+				lbl->setVisible(false);
+				auto wp = lbl->getParent()->convertToWorldSpace(lbl->getPosition());
+				hideNear(page, wp); // the reward chest sits just to the right of the label
+			} else if (l.find("something epic") != std::string::npos || startsWith(t, "New Daily Demon in:")) {
+				lbl->setString(countdownText().c_str());
+			}
+		}
+	}
+
 	void failStatus(GJErrorCode code) {
+		if (code == GJErrorCode::NotFound) {
+			Notification::create("No Daily Demon has been set for today", NotificationIcon::Info)->show();
+		} else {
+			Notification::create("Couldn't reach the Daily Demon server", NotificationIcon::Error)->show();
+		}
 		auto mgr = GameLevelManager::sharedState();
 		if (mgr->m_GJDailyLevelDelegate) mgr->m_GJDailyLevelDelegate->dailyStatusFailed(GJTimedLevelType::Event, code);
 	}
@@ -84,7 +183,7 @@ namespace {
 
 				auto body = res.string().unwrapOr("");
 				auto parts = utils::string::split(body, "|");
-				if (parts.size() != 3) return failStatus(GJErrorCode::NotFound); // "-1" = nothing set for today
+				if (parts.size() < 3) return failStatus(GJErrorCode::NotFound); // "-1" = nothing set for today
 
 				auto day = utils::numFromString<int>(parts[0]);
 				auto left = utils::numFromString<int>(parts[1]);
@@ -92,6 +191,11 @@ namespace {
 				if (day.isErr() || left.isErr() || lvl.isErr() || lvl.unwrap() <= 0) return failStatus(GJErrorCode::NotFound);
 
 				g_ddLevelID = lvl.unwrap();
+				g_ddNumber = 0;
+				if (parts.size() >= 4) {
+					if (auto n = utils::numFromString<int>(parts[3]); n.isOk()) g_ddNumber = n.unwrap();
+				}
+				g_ddEndsAt = std::time(nullptr) + left.unwrap();
 				g_ddDailyID = DD_ID_OFFSET + (day.unwrap() % 100000);
 
 				auto mgr = GameLevelManager::sharedState();
@@ -144,6 +248,7 @@ protected:
 			if (res.ok() && body == "1") {
 				Notification::create("Daily Demon set!", NotificationIcon::Success)->show();
 				this->onClose(nullptr);
+				if (g_ddMode) fetchDailyDemon(); // refresh the open popup with the new level
 			} else if (body == "-2") {
 				Notification::create("Not authorised", NotificationIcon::Error)->show();
 			} else {
@@ -210,13 +315,23 @@ class $modify(DDPage, DailyLevelPage) {
 		if (auto p = DDSetPopup::create()) p->show();
 	}
 
+	void createDailyNode(GJGameLevel* level, bool instant, float delay, bool isNew) {
+		DailyLevelPage::createDailyNode(level, instant, delay, isNew);
+		if (m_fields->m_isDD) tidyDDPage(this);
+	}
+
+	void updateTimers(float dt) {
+		DailyLevelPage::updateTimers(dt);
+		if (m_fields->m_isDD) tidyDDPage(this);
+	}
+
 	void onClose(CCObject* sender) {
-		if (m_fields->m_isDD) g_ddMode = false;
+		if (m_fields->m_isDD) endDDMode();
 		DailyLevelPage::onClose(sender);
 	}
 
 	void keyBackClicked() {
-		if (m_fields->m_isDD) g_ddMode = false;
+		if (m_fields->m_isDD) endDDMode();
 		DailyLevelPage::keyBackClicked();
 	}
 
@@ -279,17 +394,16 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 				bg->setScale((oldSpr->getContentSize().width * oldSpr->getScale()) / bg->getContentSize().width);
 				auto size = bg->getContentSize();
 				// Featured Easy Demon icon: easy demon face over the featured glow coin.
-				auto center = CCPoint{size.width / 2.f, size.height * .58f};
-				if (auto coin = CCSprite::createWithSpriteFrameName("GJ_featuredCoin_001.png")) {
-					coin->setScale(1.9f);
-					coin->setPosition(center);
-					bg->addChild(coin);
-				}
-				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) {
-					face->setScale(1.9f);
-					face->setPosition(center);
-					bg->addChild(face);
-				}
+				// Sized relative to the tile (the tile PNG has no HD/UHD suffix, so its size in
+				// game units is not its pixel size) and kept above the lettering.
+				auto center = CCPoint{size.width / 2.f, size.height * .60f};
+				auto fit = [&](CCSprite* spr, float widthFraction) {
+					spr->setScale(size.width * widthFraction / spr->getContentSize().width);
+					spr->setPosition(center);
+					bg->addChild(spr);
+				};
+				if (auto coin = CCSprite::createWithSpriteFrameName("GJ_featuredCoin_001.png")) fit(coin, .62f);
+				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) fit(face, .44f);
 
 				auto newBtn = CCMenuItemSpriteExtra::create(bg, this, menu_selector(DDCreatorLayer::onDailyDemon));
 				newBtn->setID("daily-demon-button");
@@ -304,9 +418,7 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 	}
 
 	void onDailyDemon(CCObject*) {
-		g_ddMode = true;
-		g_ddLevelID = 0;
-		g_ddDailyID = 0;
+		beginDDMode();
 		DailyLevelPage::create(GJTimedLevelType::Event)->show();
 	}
 };
