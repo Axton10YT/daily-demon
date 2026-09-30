@@ -7,7 +7,7 @@
 		"ios": "2.2081"
 	},
 	"version": "v1.0.0",
-	"id": "metal.daily-demon",
+	"id": "axton10yt.daily-demon",
 	"name": "Daily Demon",
 	"description": "Replaces the Versus button with a Daily Demon button: a new demon every day in an Event-style popup.",
 	"resources": {
@@ -36,7 +36,7 @@
 		"content"
 	],
 	"developers": [
-		"MeTal"
+		"Axton10YT"
 	],
 	"links": {
 		"source": "https://github.com/Axton10YT/daily-demon"
