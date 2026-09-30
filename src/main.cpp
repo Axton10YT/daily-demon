@@ -1,8 +1,19 @@
+// Daily Demon - replaces the Versus button in CreatorLayer with a Daily Demon button.
+//
+// The popup is the game's own DailyLevelPage opened as the Event type, so it looks and behaves
+// like the Event level popup. While that popup is open ("DD mode") three calls are redirected:
+//   GameLevelManager::getGJDailyLevelState(Event) -> GET {server}/getGJDailyDemon.php  ("dayID|secondsLeft|levelID")
+//   GameLevelManager::downloadLevel(<negative id>, .., dailyID) -> downloads the real levelID from the endpoint
+//   DailyLevelPage::levelDownloadFinished          -> tags the level with a daily ID so the node is built
+//
+// Users listed in ids.txt also get a "Set" button in the popup that POSTs to setGJDDLevel.php.
+
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CreatorLayer.hpp>
 #include <Geode/modify/GameLevelManager.hpp>
 #include <Geode/modify/DailyLevelPage.hpp>
 #include <Geode/utils/web.hpp>
+#include <Geode/utils/async.hpp>
 
 using namespace geode::prelude;
 
@@ -15,9 +26,10 @@ namespace {
 	int g_ddLevelID = 0;
 	int g_ddDailyID = 0;
 
-	EventListener<web::WebTask> g_fetchListener;
-	EventListener<web::WebTask> g_idsListener;
-	EventListener<web::WebTask> g_setListener;
+	// Geode v5: web requests are futures; a TaskHolder aborts the task when replaced/destroyed
+	// and runs the callback on the main thread.
+	async::TaskHolder<web::WebResponse> g_fetchHolder;
+	async::TaskHolder<web::WebResponse> g_idsHolder;
 
 	// 0 = unknown/loading, 1 = allowed, -1 = not allowed
 	int g_allowed = 0;
@@ -34,28 +46,28 @@ namespace {
 
 	void checkAllowed(std::function<void(bool)> cb) {
 		if (g_allowed != 0) return cb(g_allowed > 0);
-		g_idsListener.bind([cb](web::WebTask::Event* e) {
-			auto* res = e->getValue();
-			if (!res) return;
-			bool ok = false;
-			if (res->ok()) {
-				auto body = res->string().unwrapOr("");
-				std::string tok;
-				auto flush = [&]() {
-					if (!tok.empty()) {
-						if (auto id = numFromString<int>(tok); id.isOk() && id.unwrap() == myUserID()) ok = true;
-						tok.clear();
+		g_idsHolder.spawn(
+			web::WebRequest().timeout(std::chrono::seconds(8)).get(ALLOWED_IDS_URL),
+			[cb](web::WebResponse res) {
+				bool ok = false;
+				if (res.ok()) {
+					auto body = res.string().unwrapOr("");
+					std::string tok;
+					auto flush = [&]() {
+						if (!tok.empty()) {
+							if (auto id = utils::numFromString<int>(tok); id.isOk() && id.unwrap() == myUserID()) ok = true;
+							tok.clear();
+						}
+					};
+					for (char c : body) {
+						if (c >= '0' && c <= '9') tok += c; else flush();
 					}
-				};
-				for (char c : body) {
-					if (c >= '0' && c <= '9') tok += c; else flush();
+					flush();
+					g_allowed = ok ? 1 : -1;
 				}
-				flush();
-				g_allowed = ok ? 1 : -1;
+				cb(ok);
 			}
-			cb(ok);
-		});
-		g_idsListener.setFilter(web::WebRequest().timeout(std::chrono::seconds(8)).get(ALLOWED_IDS_URL));
+		);
 	}
 
 	void failStatus(GJErrorCode code) {
@@ -64,42 +76,45 @@ namespace {
 	}
 
 	void fetchDailyDemon() {
-		g_fetchListener.bind([](web::WebTask::Event* e) {
-			auto* res = e->getValue();
-			if (!res) return;
-			if (!g_ddMode) return;
-			if (!res->ok()) return failStatus(GJErrorCode::GenericError);
+		g_fetchHolder.spawn(
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJDailyDemon.php")),
+			[](web::WebResponse res) {
+				if (!g_ddMode) return;
+				if (!res.ok()) return failStatus(GJErrorCode::GenericError);
 
-			auto body = res->string().unwrapOr("");
-			auto parts = utils::string::split(body, "|");
-			if (parts.size() != 3) return failStatus(GJErrorCode::NotFound); // "-1" = nothing set for today
+				auto body = res.string().unwrapOr("");
+				auto parts = utils::string::split(body, "|");
+				if (parts.size() != 3) return failStatus(GJErrorCode::NotFound); // "-1" = nothing set for today
 
-			auto day = numFromString<int>(parts[0]);
-			auto left = numFromString<int>(parts[1]);
-			auto lvl = numFromString<int>(parts[2]);
-			if (day.isErr() || left.isErr() || lvl.isErr() || lvl.unwrap() <= 0) return failStatus(GJErrorCode::NotFound);
+				auto day = utils::numFromString<int>(parts[0]);
+				auto left = utils::numFromString<int>(parts[1]);
+				auto lvl = utils::numFromString<int>(parts[2]);
+				if (day.isErr() || left.isErr() || lvl.isErr() || lvl.unwrap() <= 0) return failStatus(GJErrorCode::NotFound);
 
-			g_ddLevelID = lvl.unwrap();
-			g_ddDailyID = DD_ID_OFFSET + (day.unwrap() % 100000);
+				g_ddLevelID = lvl.unwrap();
+				g_ddDailyID = DD_ID_OFFSET + (day.unwrap() % 100000);
 
-			auto mgr = GameLevelManager::sharedState();
-			mgr->storeDailyLevelState(g_ddDailyID, left.unwrap(), GJTimedLevelType::Event);
-			if (mgr->m_GJDailyLevelDelegate) mgr->m_GJDailyLevelDelegate->dailyStatusFinished(GJTimedLevelType::Event);
-		});
-		g_fetchListener.setFilter(web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJDailyDemon.php")));
+				auto mgr = GameLevelManager::sharedState();
+				mgr->storeDailyLevelState(g_ddDailyID, left.unwrap(), GJTimedLevelType::Event);
+				if (mgr->m_GJDailyLevelDelegate) mgr->m_GJDailyLevelDelegate->dailyStatusFinished(GJTimedLevelType::Event);
+			}
+		);
 	}
 }
 
 // ---- set-level popup (only reachable for users in ids.txt) ----------------------------------
 
-class DDSetPopup : public geode::Popup<> {
+class DDSetPopup : public geode::Popup {
 protected:
 	TextInput* m_input = nullptr;
+	async::TaskHolder<web::WebResponse> m_holder;
 
-	bool setup() override {
+	bool init() {
+		if (!Popup::init(260.f, 140.f)) return false;
 		this->setTitle("Set Daily Demon");
+
 		m_input = TextInput::create(160.f, "Level ID", "bigFont.fnt");
-		m_input->setFilter(CommonFilter::Uint);
+		m_input->setCommonFilter(CommonFilter::Uint);
 		m_input->setMaxCharCount(10);
 		m_mainLayer->addChildAtPosition(m_input, Anchor::Center, {0.f, 8.f});
 
@@ -114,36 +129,33 @@ protected:
 	}
 
 	void onSet(CCObject*) {
-		auto id = numFromString<int>(m_input->getString());
+		auto id = utils::numFromString<int>(std::string(m_input->getString()));
 		if (id.isErr() || id.unwrap() <= 0) {
 			return Notification::create("Enter a valid level ID", NotificationIcon::Error)->show();
 		}
-		auto req = web::WebRequest()
-			.timeout(std::chrono::seconds(10))
-			.header("Content-Type", "application/x-www-form-urlencoded")
-			.bodyString(fmt::format("userID={}&levelID={}", myUserID(), id.unwrap()));
+		auto req = web::WebRequest();
+		req.timeout(std::chrono::seconds(10));
+		req.header("Content-Type", "application/x-www-form-urlencoded");
+		req.bodyString(fmt::format("userID={}&levelID={}", myUserID(), id.unwrap()));
 
-		Ref<DDSetPopup> self = this;
-		g_setListener.bind([self](web::WebTask::Event* e) {
-			auto* res = e->getValue();
-			if (!res) return;
-			auto body = res->string().unwrapOr("");
-			if (res->ok() && body == "1") {
+		// The holder lives in this popup, so the request is cancelled if the popup closes first.
+		m_holder.spawn(req.post(serverURL("setGJDDLevel.php")), [this](web::WebResponse res) {
+			auto body = res.string().unwrapOr("");
+			if (res.ok() && body == "1") {
 				Notification::create("Daily Demon set!", NotificationIcon::Success)->show();
-				self->onClose(nullptr);
+				this->onClose(nullptr);
 			} else if (body == "-2") {
 				Notification::create("Not authorised", NotificationIcon::Error)->show();
 			} else {
 				Notification::create(fmt::format("Failed ({})", body.empty() ? "no response" : body), NotificationIcon::Error)->show();
 			}
 		});
-		g_setListener.setFilter(req.post(serverURL("setGJDDLevel.php")));
 	}
 
 public:
 	static DDSetPopup* create() {
 		auto ret = new DDSetPopup();
-		if (ret->initAnchored(260.f, 140.f)) {
+		if (ret->init()) {
 			ret->autorelease();
 			return ret;
 		}
@@ -229,10 +241,13 @@ class $modify(DDManager, GameLevelManager) {
 		return GameLevelManager::getGJDailyLevelState(type);
 	}
 
-	void downloadLevel(int id, bool gauntlet) {
+	void downloadLevel(int id, bool gauntlet, int dailyID) {
 		// Daily/weekly/event pages request negative IDs (-1/-2/-3); give them our real level instead.
-		if (g_ddMode && id < 0 && g_ddLevelID > 0) id = g_ddLevelID;
-		GameLevelManager::downloadLevel(id, gauntlet);
+		if (g_ddMode && id < 0 && g_ddLevelID > 0) {
+			id = g_ddLevelID;
+			dailyID = g_ddDailyID;
+		}
+		GameLevelManager::downloadLevel(id, gauntlet, dailyID);
 	}
 };
 
@@ -259,7 +274,7 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 				if (!oldSpr || !oldSpr->isFrameDisplayed(versusFrame)) continue;
 
 				// Build the new sprite: our background + the demon face from the game's own sheet.
-				auto bg = CCSprite::create(Mod::get()->expandSpriteName("DD_btn_001.png").data());
+				auto bg = CCSprite::create(Mod::get()->expandSpriteName("DD_btn_001.png").c_str());
 				if (!bg) return;
 				bg->setScale((oldSpr->getContentSize().width * oldSpr->getScale()) / bg->getContentSize().width);
 				auto size = bg->getContentSize();
