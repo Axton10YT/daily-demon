@@ -1,0 +1,44 @@
+{
+	"geode": "4.6.0",
+	"gd": {
+		"win": "2.2074",
+		"android": "2.2074",
+		"mac": "2.2074",
+		"ios": "2.2074"
+	},
+	"version": "v1.0.0",
+	"id": "metal.daily-demon",
+	"name": "Daily Demon",
+	"description": "Replaces the Versus button with a Daily Demon button: a new demon every day in an Event-style popup.",
+	"resources": {
+		"sprites": [
+			"resources/*.png"
+		]
+	},
+	"settings": {
+		"server": {
+			"type": "string",
+			"name": "Server",
+			"description": "Base URL of the Daily Demon server.",
+			"default": "https://cheesegd.com",
+			"platforms": [
+				"win",
+				"android",
+				"mac",
+				"ios"
+			]
+		}
+	},
+	"tags": [
+		"online",
+		"gameplay",
+		"interface",
+		"content"
+	],
+	"developers": [
+		"MeTal"
+	],
+	"links": {
+		"source": "https://github.com/"
+	}
+}
