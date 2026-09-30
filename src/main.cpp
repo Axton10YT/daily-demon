@@ -297,18 +297,24 @@ class $modify(DDPage, DailyLevelPage) {
 			}
 		}
 
-		// "Set" button for whitelisted users.
-		Ref<DailyLevelPage> self = this;
+		// "Set" button for whitelisted users. The permission answer can be instant (cached), in
+		// which case the popup isn't on screen yet, so always add the button a frame later.
+		Ref<DDPage> self = this;
 		checkAllowed([self](bool ok) {
-			if (!ok || !self->getParent() || !self->m_buttonMenu) return;
-			auto spr = ButtonSprite::create("Set", "goldFont.fnt", "GJ_button_04.png", .6f);
-			auto btn = CCMenuItemSpriteExtra::create(spr, self, menu_selector(DDPage::onSetDD));
-			btn->setID("set-button");
-			auto win = CCDirector::get()->getWinSize();
-			btn->setPosition(self->m_buttonMenu->convertToNodeSpace({win.width / 2.f + 150.f, win.height / 2.f - 100.f}));
-			self->m_buttonMenu->addChild(btn);
+			if (!ok) return;
+			queueInMainThread([self] { self->addSetButton(); });
 		});
 		return true;
+	}
+
+	void addSetButton() {
+		if (!m_buttonMenu || m_buttonMenu->getChildByID("set-button")) return;
+		auto spr = ButtonSprite::create("Set", "goldFont.fnt", "GJ_button_04.png", .6f);
+		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(DDPage::onSetDD));
+		btn->setID("set-button");
+		auto win = CCDirector::get()->getWinSize();
+		btn->setPosition(m_buttonMenu->convertToNodeSpace({win.width / 2.f + 150.f, win.height / 2.f - 100.f}));
+		m_buttonMenu->addChild(btn);
 	}
 
 	void onSetDD(CCObject*) {
@@ -393,17 +399,13 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 				if (!bg) return;
 				bg->setScale((oldSpr->getContentSize().width * oldSpr->getScale()) / bg->getContentSize().width);
 				auto size = bg->getContentSize();
-				// Featured Easy Demon icon: easy demon face over the featured glow coin.
-				// Sized relative to the tile (the tile PNG has no HD/UHD suffix, so its size in
-				// game units is not its pixel size) and kept above the lettering.
-				auto center = CCPoint{size.width / 2.f, size.height * .60f};
-				auto fit = [&](CCSprite* spr, float widthFraction) {
-					spr->setScale(size.width * widthFraction / spr->getContentSize().width);
-					spr->setPosition(center);
-					bg->addChild(spr);
-				};
-				if (auto coin = CCSprite::createWithSpriteFrameName("GJ_featuredCoin_001.png")) fit(coin, .62f);
-				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) fit(face, .44f);
+				// Plain Easy Demon face. Sized relative to the tile (the tile PNG has no HD/UHD suffix,
+				// so its size in game units is not its pixel size) and kept above the lettering.
+				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) {
+					face->setScale(size.width * .60f / face->getContentSize().width);
+					face->setPosition({size.width / 2.f, size.height * .60f});
+					bg->addChild(face);
+				}
 
 				auto newBtn = CCMenuItemSpriteExtra::create(bg, this, menu_selector(DDCreatorLayer::onDailyDemon));
 				newBtn->setID("daily-demon-button");
