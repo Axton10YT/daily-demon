@@ -21,8 +21,7 @@
 using namespace geode::prelude;
 
 namespace {
-	constexpr char const* ALLOWED_IDS_URL = "https://audio.cheesecdn.com/ids.txt.txt";
-	// Offset keeps our daily ID clear of any real Event IDs stored by the game.
+		// Offset keeps our daily ID clear of any real Event IDs stored by the game.
 	constexpr int DD_ID_OFFSET = 700000;
 
 	bool g_ddMode = false;
@@ -52,7 +51,7 @@ namespace {
 	void checkAllowed(std::function<void(bool)> cb) {
 		if (g_allowed != 0) return cb(g_allowed > 0);
 		g_idsHolder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(8)).get(ALLOWED_IDS_URL),
+			web::WebRequest().timeout(std::chrono::seconds(8)).get(serverURL("getGJDDIDs.php")),
 			[cb](web::WebResponse res) {
 				bool ok = false;
 				if (res.ok()) {
@@ -281,10 +280,14 @@ class $modify(DDPage, DailyLevelPage) {
 				auto spr = typeinfo_cast<CCSprite*>(child);
 				if (spr && spr->isFrameDisplayed(frame)) {
 					auto logo = CCSprite::create(Mod::get()->expandSpriteName("DD_title.png").c_str());
-					if (logo) {
+					if (logo && m_buttonMenu) {
 						logo->setScale(150.f / logo->getContentSize().width);
-						logo->setPosition(spr->getPosition());
-						spr->getParent()->addChild(logo, spr->getZOrder());
+						// Tapping the logo requests permission to set Daily Demons.
+						auto btn = CCMenuItemSpriteExtra::create(logo, this, menu_selector(DDPage::onLogo));
+						btn->setID("dd-logo");
+						auto world = spr->getParent()->convertToWorldSpace(spr->getPosition());
+						btn->setPosition(m_buttonMenu->convertToNodeSpace(world));
+						m_buttonMenu->addChild(btn);
 					}
 					spr->setVisible(false);
 					break;
@@ -304,10 +307,8 @@ class $modify(DDPage, DailyLevelPage) {
 			}
 			if (bg) {
 				auto sz = bg->getContentSize();
-				auto panel = CCScale9Sprite::create("square02_001.png");
-				panel->setContentSize({sz.width - 10.f, sz.height - 10.f});
-				panel->setColor({255, 120, 120});
-				panel->setPosition({sz.width / 2.f, sz.height / 2.f});
+				auto panel = CCLayerColor::create({255, 135, 135, 255}, sz.width - 12.f, sz.height - 12.f);
+				panel->setPosition({6.f, 6.f});
 				bg->addChild(panel, 1);
 			}
 		}
@@ -328,6 +329,35 @@ class $modify(DDPage, DailyLevelPage) {
 	void onClose(CCObject* sender) {
 		if (m_fields->m_isDD) endDDMode();
 		DailyLevelPage::onClose(sender);
+	}
+
+	void onLogo(CCObject*) {
+		checkAllowed([](bool ok) {
+			if (ok) {
+				return Notification::create("You can already set Daily Demons (use Set DD on a level page)", NotificationIcon::Info)->show();
+			}
+			createQuickPopup(
+				"Daily Demon",
+				"Want to be able to <cy>set Daily Demons</c>? Send a request and it will be reviewed.",
+				"Cancel", "Request",
+				[](FLAlertLayer*, bool yes) {
+					if (!yes) return;
+					auto req = web::WebRequest();
+					req.timeout(std::chrono::seconds(10));
+					req.header("Content-Type", "application/x-www-form-urlencoded");
+					req.bodyString(fmt::format("userID={}&userName={}", myUserID(), utils::string::replace(std::string(GameManager::get()->m_playerName), " ", "_")));
+					static async::TaskHolder<web::WebResponse> holder;
+					holder.spawn(req.post(serverURL("requestGJDDAccess.php")), [](web::WebResponse res) {
+						auto body = res.string().unwrapOr("");
+						if (res.ok() && body == "1") Notification::create("Request sent!", NotificationIcon::Success)->show();
+						else if (body == "3") Notification::create("Your request is already pending", NotificationIcon::Info)->show();
+						else if (body == "2") Notification::create("You already have access", NotificationIcon::Info)->show();
+						else if (body == "-2") Notification::create("Your request was declined", NotificationIcon::Error)->show();
+						else Notification::create("Couldn't send the request", NotificationIcon::Error)->show();
+					});
+				}
+			);
+		});
 	}
 
 	void onTheSafe(CCObject* sender) {
