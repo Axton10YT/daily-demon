@@ -554,13 +554,15 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 				// Plain Easy Demon face. Sized relative to the tile (the tile PNG has no HD/UHD suffix,
 				// so its size in game units is not its pixel size) and kept above the lettering.
 				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) {
-					face->setScale(size.width * .64f / face->getContentSize().width);
-					face->setPosition({size.width * .472f, size.height * .62f}); // tile art is 94/199 across; the rest is its drop shadow
+					face->setScale(size.width * .50f / face->getContentSize().width);
+					face->setPosition({size.width * .472f, size.height * .60f}); // tile art is 94/199 across; the rest is its drop shadow
 					bg->addChild(face);
 				}
 
 				auto newBtn = CCMenuItemSpriteExtra::create(bg, this, menu_selector(DDCreatorLayer::onDailyDemon));
 				newBtn->setID("daily-demon-button");
+				newBtn->setScale(btn->getScale());
+				newBtn->m_baseScale = btn->m_baseScale; // keep the same size as the neighbouring tiles
 				newBtn->setPosition(btn->getPosition());
 				newBtn->setZOrder(btn->getZOrder());
 				menu->addChild(newBtn);
