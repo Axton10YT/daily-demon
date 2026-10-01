@@ -167,10 +167,42 @@ namespace {
 		}
 	}
 
+	// Event pages carry a reward chest in the bottom centre. Daily Demons have no chest.
+	void hideChest(CCNode* node, CCNode* layer) {
+		if (!node || !layer) return;
+		auto size = layer->getContentSize();
+		for (auto child : CCArrayExt<CCNode*>(node->getChildren())) {
+			if (!child->isVisible()) continue;
+			bool candidate = typeinfo_cast<CCSprite*>(child) || typeinfo_cast<CCMenuItem*>(child);
+			if (candidate && !typeinfo_cast<CCScale9Sprite*>(child) && !typeinfo_cast<CCLabelBMFont*>(child)) {
+				auto p = layer->convertToNodeSpace(child->getParent()->convertToWorldSpace(child->getPosition()));
+				if (std::abs(p.x - size.width / 2.f) < size.width * .12f && p.y < size.height * .30f) {
+					child->setVisible(false);
+					if (auto item = typeinfo_cast<CCMenuItem*>(child)) item->setEnabled(false);
+					continue;
+				}
+			}
+			hideChest(child, layer);
+		}
+	}
+
 	// The popup is the Event page, so strip/relabel everything that says "Event".
-	void tidyDDPage(CCNode* page) {
+	void tidyDDPage(CCNode* page, CCNode* layer = nullptr) {
 		std::vector<CCLabelBMFont*> labels;
 		collectLabels(page, labels);
+		if (layer) {
+			hideChest(layer, layer);
+			// The lowest visible label under the popup is the timer/flavour text: make it an exact countdown.
+			CCLabelBMFont* lowest = nullptr;
+			float lowY = 1e9f;
+			for (auto lbl : labels) {
+				if (!lbl->isVisible()) continue;
+				if (typeinfo_cast<CCMenuItem*>(lbl->getParent())) continue;
+				float y = lbl->getParent()->convertToWorldSpace(lbl->getPosition()).y;
+				if (y < lowY) { lowY = y; lowest = lbl; }
+			}
+			if (lowest && g_ddEndsAt > 0) lowest->setString(countdownText().c_str());
+		}
 		for (auto lbl : labels) {
 			std::string t = lbl->getString();
 			std::string l = lower(t);
@@ -242,19 +274,41 @@ class $modify(DDPage, DailyLevelPage) {
 		if (!g_ddMode || type != GJTimedLevelType::Event) return true;
 		m_fields->m_isDD = true;
 
-		// Swap the "EVENT" title sprite for a Daily Demon label.
+		// Swap the "EVENT" title sprite for the Daily Demon logo.
 		auto frame = CCSpriteFrameCache::get()->spriteFrameByName("eventLevelLabel_001.png");
 		if (frame && m_mainLayer) {
 			for (auto child : CCArrayExt<CCNode*>(m_mainLayer->getChildren())) {
 				auto spr = typeinfo_cast<CCSprite*>(child);
 				if (spr && spr->isFrameDisplayed(frame)) {
-					auto label = CCLabelBMFont::create("Daily Demon", "goldFont.fnt");
-					label->setPosition(spr->getPosition());
-					label->setScale(.8f);
-					spr->getParent()->addChild(label, spr->getZOrder());
+					auto logo = CCSprite::create(Mod::get()->expandSpriteName("DD_title.png").c_str());
+					if (logo) {
+						logo->setScale(150.f / logo->getContentSize().width);
+						logo->setPosition(spr->getPosition());
+						spr->getParent()->addChild(logo, spr->getZOrder());
+					}
 					spr->setVisible(false);
 					break;
 				}
+			}
+		}
+
+		// Light red panel inside the popup frame (a child of the background so it draws right above it).
+		if (m_mainLayer) {
+			CCScale9Sprite* bg = nullptr;
+			float best = 0.f;
+			for (auto child : CCArrayExt<CCNode*>(m_mainLayer->getChildren())) {
+				if (auto s9 = typeinfo_cast<CCScale9Sprite*>(child)) {
+					auto sz = s9->getContentSize();
+					if (sz.width * sz.height > best) { best = sz.width * sz.height; bg = s9; }
+				}
+			}
+			if (bg) {
+				auto sz = bg->getContentSize();
+				auto panel = CCScale9Sprite::create("square02_001.png");
+				panel->setContentSize({sz.width - 10.f, sz.height - 10.f});
+				panel->setColor({255, 120, 120});
+				panel->setPosition({sz.width / 2.f, sz.height / 2.f});
+				bg->addChild(panel, 1);
 			}
 		}
 
@@ -263,17 +317,35 @@ class $modify(DDPage, DailyLevelPage) {
 
 	void createDailyNode(GJGameLevel* level, bool instant, float delay, bool isNew) {
 		DailyLevelPage::createDailyNode(level, instant, delay, isNew);
-		if (m_fields->m_isDD) tidyDDPage(this);
+		if (m_fields->m_isDD) tidyDDPage(this, m_mainLayer);
 	}
 
 	void updateTimers(float dt) {
 		DailyLevelPage::updateTimers(dt);
-		if (m_fields->m_isDD) tidyDDPage(this);
+		if (m_fields->m_isDD) tidyDDPage(this, m_mainLayer);
 	}
 
 	void onClose(CCObject* sender) {
 		if (m_fields->m_isDD) endDDMode();
 		DailyLevelPage::onClose(sender);
+	}
+
+	void onTheSafe(CCObject* sender) {
+		if (!m_fields->m_isDD) return DailyLevelPage::onTheSafe(sender);
+		// The Safe lists every level that was ever a Daily Demon.
+		Ref<DDPage> self = this;
+		static async::TaskHolder<web::WebResponse> holder;
+		holder.spawn(
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJDDList.php")),
+			[self](web::WebResponse res) {
+				auto body = res.string().unwrapOr("");
+				if (!res.ok() || body.empty() || body == "-1") {
+					return Notification::create("No Daily Demons yet", NotificationIcon::Info)->show();
+				}
+				auto search = GJSearchObject::create(SearchType::MapPackOnClick, body);
+				CCDirector::get()->pushScene(CCTransitionFade::create(.5f, LevelBrowserLayer::scene(search)));
+			}
+		);
 	}
 
 	void keyBackClicked() {
@@ -330,6 +402,13 @@ class $modify(DDLevelInfo, LevelInfoLayer) {
 	bool init(GJGameLevel* level, bool challenge) {
 		if (!LevelInfoLayer::init(level, challenge)) return false;
 		if (!level || level->m_levelID.value() <= 0) return true;
+		if (level->m_dailyID.value() >= DD_ID_OFFSET) {
+			std::vector<CCLabelBMFont*> labels;
+			collectLabels(this, labels);
+			for (auto lbl : labels) {
+				if (lower(lbl->getString()).find("(event)") != std::string::npos) lbl->setString("(Daily Demon)");
+			}
+		}
 		Ref<DDLevelInfo> self = this;
 		checkAllowed([self](bool ok) {
 			if (!ok) return;
