@@ -555,7 +555,7 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 				// so its size in game units is not its pixel size) and kept above the lettering.
 				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) {
 					face->setScale(size.width * .64f / face->getContentSize().width);
-					face->setPosition({size.width / 2.f, size.height * .62f});
+					face->setPosition({size.width * .472f, size.height * .62f}); // tile art is 94/199 across; the rest is its drop shadow
 					bg->addChild(face);
 				}
 
