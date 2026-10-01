@@ -322,7 +322,7 @@ class $modify(DDPage, DailyLevelPage) {
 			}
 		}
 
-		// Light red panel inside the popup frame (a child of the background so it draws right above it).
+		// Black panel inside the popup frame (a child of the background so it draws right above it).
 		if (m_mainLayer) {
 			CCScale9Sprite* bg = nullptr;
 			float best = 0.f;
@@ -334,7 +334,7 @@ class $modify(DDPage, DailyLevelPage) {
 			}
 			if (bg) {
 				auto sz = bg->getContentSize();
-				auto panel = CCLayerColor::create({255, 135, 135, 255}, sz.width - 12.f, sz.height - 12.f);
+				auto panel = CCLayerColor::create({0, 0, 0, 255}, sz.width - 12.f, sz.height - 12.f);
 				panel->setPosition({6.f, 6.f});
 				bg->addChild(panel, 1);
 			}
@@ -554,8 +554,8 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 				// Plain Easy Demon face. Sized relative to the tile (the tile PNG has no HD/UHD suffix,
 				// so its size in game units is not its pixel size) and kept above the lettering.
 				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) {
-					face->setScale(size.width * .60f / face->getContentSize().width);
-					face->setPosition({size.width / 2.f, size.height * .60f});
+					face->setScale(size.width * .64f / face->getContentSize().width);
+					face->setPosition({size.width / 2.f, size.height * .62f});
 					bg->addChild(face);
 				}
 
