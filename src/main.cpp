@@ -6,15 +6,17 @@
 //   GameLevelManager::downloadLevel(<negative id>, .., dailyID) -> downloads the real levelID from the endpoint
 //   DailyLevelPage::levelDownloadFinished          -> tags the level with a daily ID so the node is built
 //
-// Users listed in ids.txt also get a "Set" button in the popup that POSTs to setGJDDLevel.php.
+// Users listed in ids.txt also get a "Set DD" button on level pages that POSTs to setGJDDLevel.php.
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CreatorLayer.hpp>
 #include <Geode/modify/GameLevelManager.hpp>
 #include <Geode/modify/DailyLevelPage.hpp>
+#include <Geode/modify/LevelInfoLayer.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
 #include <ctime>
+#include <set>
 
 using namespace geode::prelude;
 
@@ -92,15 +94,37 @@ namespace {
 		g_ddMode = true;
 	}
 
+	// Entries we put into the manager's daily-level dictionary. They must never survive into the
+	// game's save data, so they are removed when the popup closes and right before every save.
+	std::set<int> g_injected;
+
+	void purgeInjected() {
+		if (g_injected.empty()) return;
+		auto mgr = GameLevelManager::sharedState();
+		if (mgr && mgr->m_dailyLevels) {
+			for (int id : g_injected) {
+				if (auto lvl = static_cast<GJGameLevel*>(mgr->m_dailyLevels->objectForKey(id))) {
+					lvl->m_dailyID = 0;
+					mgr->m_dailyLevels->removeObjectForKey(id);
+				}
+			}
+		}
+		g_injected.clear();
+	}
+
+	void restoreEventState() {
+		if (!g_saved.has) return;
+		auto mgr = GameLevelManager::sharedState();
+		mgr->m_eventID = g_saved.id;
+		mgr->m_eventTimeLeft = g_saved.timeLeft;
+		mgr->m_activeEventID = g_saved.active;
+		g_saved.has = false;
+	}
+
 	void endDDMode() {
 		g_ddMode = false;
-		if (g_saved.has) {
-			auto mgr = GameLevelManager::sharedState();
-			mgr->m_eventID = g_saved.id;
-			mgr->m_eventTimeLeft = g_saved.timeLeft;
-			mgr->m_activeEventID = g_saved.active;
-			g_saved.has = false;
-		}
+		purgeInjected();
+		restoreEventState();
 	}
 
 	std::string lower(std::string s) {
@@ -206,69 +230,6 @@ namespace {
 	}
 }
 
-// ---- set-level popup (only reachable for users in ids.txt) ----------------------------------
-
-class DDSetPopup : public geode::Popup {
-protected:
-	TextInput* m_input = nullptr;
-	async::TaskHolder<web::WebResponse> m_holder;
-
-	bool init() {
-		if (!Popup::init(260.f, 140.f)) return false;
-		this->setTitle("Set Daily Demon");
-
-		m_input = TextInput::create(160.f, "Level ID", "bigFont.fnt");
-		m_input->setCommonFilter(CommonFilter::Uint);
-		m_input->setMaxCharCount(10);
-		m_mainLayer->addChildAtPosition(m_input, Anchor::Center, {0.f, 8.f});
-
-		auto info = CCLabelBMFont::create("Sets today's (UTC) Daily Demon", "chatFont.fnt");
-		info->setScale(.6f);
-		info->setOpacity(160);
-		m_mainLayer->addChildAtPosition(info, Anchor::Center, {0.f, -18.f});
-
-		auto btn = CCMenuItemSpriteExtra::create(ButtonSprite::create("Set"), this, menu_selector(DDSetPopup::onSet));
-		m_buttonMenu->addChildAtPosition(btn, Anchor::Bottom, {0.f, 24.f});
-		return true;
-	}
-
-	void onSet(CCObject*) {
-		auto id = utils::numFromString<int>(std::string(m_input->getString()));
-		if (id.isErr() || id.unwrap() <= 0) {
-			return Notification::create("Enter a valid level ID", NotificationIcon::Error)->show();
-		}
-		auto req = web::WebRequest();
-		req.timeout(std::chrono::seconds(10));
-		req.header("Content-Type", "application/x-www-form-urlencoded");
-		req.bodyString(fmt::format("userID={}&levelID={}", myUserID(), id.unwrap()));
-
-		// The holder lives in this popup, so the request is cancelled if the popup closes first.
-		m_holder.spawn(req.post(serverURL("setGJDDLevel.php")), [this](web::WebResponse res) {
-			auto body = res.string().unwrapOr("");
-			if (res.ok() && body == "1") {
-				Notification::create("Daily Demon set!", NotificationIcon::Success)->show();
-				this->onClose(nullptr);
-				if (g_ddMode) fetchDailyDemon(); // refresh the open popup with the new level
-			} else if (body == "-2") {
-				Notification::create("Not authorised", NotificationIcon::Error)->show();
-			} else {
-				Notification::create(fmt::format("Failed ({})", body.empty() ? "no response" : body), NotificationIcon::Error)->show();
-			}
-		});
-	}
-
-public:
-	static DDSetPopup* create() {
-		auto ret = new DDSetPopup();
-		if (ret->init()) {
-			ret->autorelease();
-			return ret;
-		}
-		delete ret;
-		return nullptr;
-	}
-};
-
 // ---- the popup itself ---------------------------------------------------------------------
 
 class $modify(DDPage, DailyLevelPage) {
@@ -297,28 +258,7 @@ class $modify(DDPage, DailyLevelPage) {
 			}
 		}
 
-		// "Set" button for whitelisted users. The permission answer can be instant (cached), in
-		// which case the popup isn't on screen yet, so always add the button a frame later.
-		Ref<DDPage> self = this;
-		checkAllowed([self](bool ok) {
-			if (!ok) return;
-			queueInMainThread([self] { self->addSetButton(); });
-		});
 		return true;
-	}
-
-	void addSetButton() {
-		if (!m_buttonMenu || m_buttonMenu->getChildByID("set-button")) return;
-		auto spr = ButtonSprite::create("Set", "goldFont.fnt", "GJ_button_04.png", .6f);
-		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(DDPage::onSetDD));
-		btn->setID("set-button");
-		auto win = CCDirector::get()->getWinSize();
-		btn->setPosition(m_buttonMenu->convertToNodeSpace({win.width / 2.f + 150.f, win.height / 2.f - 100.f}));
-		m_buttonMenu->addChild(btn);
-	}
-
-	void onSetDD(CCObject*) {
-		if (auto p = DDSetPopup::create()) p->show();
 	}
 
 	void createDailyNode(GJGameLevel* level, bool instant, float delay, bool isNew) {
@@ -354,6 +294,18 @@ class $modify(DDPage, DailyLevelPage) {
 };
 
 class $modify(DDManager, GameLevelManager) {
+	void encodeDataTo(DS_Dictionary* dict) {
+		// Saving on exit: make sure none of our temporary state is written/cleaned up.
+		purgeInjected();
+		restoreEventState();
+		GameLevelManager::encodeDataTo(dict);
+	}
+
+	void cleanupDailyLevels() {
+		purgeInjected();
+		GameLevelManager::cleanupDailyLevels();
+	}
+
 	bool getGJDailyLevelState(GJTimedLevelType type) {
 		if (g_ddMode && type == GJTimedLevelType::Event) {
 			fetchDailyDemon();
@@ -369,6 +321,63 @@ class $modify(DDManager, GameLevelManager) {
 			dailyID = g_ddDailyID;
 		}
 		GameLevelManager::downloadLevel(id, gauntlet, dailyID);
+	}
+};
+
+// ---- "Set as Daily Demon" button on level pages (whitelisted users only) --------------------
+
+class $modify(DDLevelInfo, LevelInfoLayer) {
+	bool init(GJGameLevel* level, bool challenge) {
+		if (!LevelInfoLayer::init(level, challenge)) return false;
+		if (!level || level->m_levelID.value() <= 0) return true;
+		Ref<DDLevelInfo> self = this;
+		checkAllowed([self](bool ok) {
+			if (!ok) return;
+			queueInMainThread([self] { self->addDDButton(); });
+		});
+		return true;
+	}
+
+	void addDDButton() {
+		if (!this->getParent() || this->getChildByID("dd-menu")) return;
+		auto menu = CCMenu::create();
+		menu->setID("dd-menu");
+		menu->setPosition({0.f, 0.f});
+		auto spr = ButtonSprite::create("Set DD", "goldFont.fnt", "GJ_button_04.png", .6f);
+		spr->setScale(.7f);
+		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(DDLevelInfo::onSetDD));
+		btn->setID("set-daily-demon-button");
+		auto win = CCDirector::get()->getWinSize();
+		btn->setPosition({win.width - 40.f, 34.f});
+		menu->addChild(btn);
+		this->addChild(menu, 10);
+	}
+
+	void onSetDD(CCObject*) {
+		int id = m_level->m_levelID.value();
+		createQuickPopup(
+			"Daily Demon",
+			fmt::format("Set <cy>{}</c> as today's Daily Demon?", std::string(m_level->m_levelName)),
+			"Cancel", "Set",
+			[id](FLAlertLayer*, bool yes) {
+				if (!yes) return;
+				auto req = web::WebRequest();
+				req.timeout(std::chrono::seconds(10));
+				req.header("Content-Type", "application/x-www-form-urlencoded");
+				req.bodyString(fmt::format("userID={}&levelID={}", myUserID(), id));
+				static async::TaskHolder<web::WebResponse> holder;
+				holder.spawn(req.post(serverURL("setGJDDLevel.php")), [](web::WebResponse res) {
+					auto body = res.string().unwrapOr("");
+					if (res.ok() && body == "1") {
+						Notification::create("Daily Demon set!", NotificationIcon::Success)->show();
+					} else if (body == "-2") {
+						Notification::create("Not authorised", NotificationIcon::Error)->show();
+					} else {
+						Notification::create(fmt::format("Failed ({})", body.empty() ? "no response" : body), NotificationIcon::Error)->show();
+					}
+				});
+			}
+		);
 	}
 };
 
