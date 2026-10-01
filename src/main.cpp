@@ -15,6 +15,7 @@
 #include <Geode/modify/LevelInfoLayer.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
+#include <argon/argon.hpp>
 #include <ctime>
 #include <set>
 
@@ -46,6 +47,32 @@ namespace {
 
 	int myUserID() {
 		return GameManager::get()->m_playerUserID.value();
+	}
+
+	std::string urlEncode(std::string const& in) {
+		std::string out;
+		for (unsigned char c : in) {
+			if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += static_cast<char>(c);
+			else out += fmt::format("%{:02X}", c);
+		}
+		return out;
+	}
+
+	// Proves account ownership through Argon (no password/GJP is ever sent), then calls cb with the
+	// POST body prefix "accountID=..&authtoken=..". Shows a notification and does nothing on failure.
+	async::TaskHolder<Result<std::string>> g_authHolder;
+	void withAuth(std::function<void(std::string)> cb) {
+		if (!argon::signedIn()) {
+			return Notification::create("Log into your GD account first", NotificationIcon::Error)->show();
+		}
+		auto account = argon::getGameAccountData();
+		Notification::create("Verifying your account...", NotificationIcon::Loading, 1.5f)->show();
+		g_authHolder.spawn(argon::startAuth(account), [cb, account](Result<std::string> res) {
+			if (res.isErr()) {
+				return Notification::create("Account verification failed", NotificationIcon::Error)->show();
+			}
+			cb(fmt::format("accountID={}&authtoken={}", account.accountId, urlEncode(res.unwrap())));
+		});
 	}
 
 	void checkAllowed(std::function<void(bool)> cb) {
@@ -342,18 +369,21 @@ class $modify(DDPage, DailyLevelPage) {
 				"Cancel", "Request",
 				[](FLAlertLayer*, bool yes) {
 					if (!yes) return;
-					auto req = web::WebRequest();
-					req.timeout(std::chrono::seconds(10));
-					req.header("Content-Type", "application/x-www-form-urlencoded");
-					req.bodyString(fmt::format("userID={}&userName={}", myUserID(), utils::string::replace(std::string(GameManager::get()->m_playerName), " ", "_")));
-					static async::TaskHolder<web::WebResponse> holder;
-					holder.spawn(req.post(serverURL("requestGJDDAccess.php")), [](web::WebResponse res) {
-						auto body = res.string().unwrapOr("");
-						if (res.ok() && body == "1") Notification::create("Request sent!", NotificationIcon::Success)->show();
-						else if (body == "3") Notification::create("Your request is already pending", NotificationIcon::Info)->show();
-						else if (body == "2") Notification::create("You already have access", NotificationIcon::Info)->show();
-						else if (body == "-2") Notification::create("Your request was declined", NotificationIcon::Error)->show();
-						else Notification::create("Couldn't send the request", NotificationIcon::Error)->show();
+					withAuth([](std::string auth) {
+						auto req = web::WebRequest();
+						req.timeout(std::chrono::seconds(10));
+						req.header("Content-Type", "application/x-www-form-urlencoded");
+						req.bodyString(auth);
+						static async::TaskHolder<web::WebResponse> holder;
+						holder.spawn(req.post(serverURL("requestGJDDAccess.php")), [](web::WebResponse res) {
+							auto body = res.string().unwrapOr("");
+							if (res.ok() && body == "1") Notification::create("Request sent!", NotificationIcon::Success)->show();
+							else if (body == "3") Notification::create("Your request is already pending", NotificationIcon::Info)->show();
+							else if (body == "2") Notification::create("You already have access", NotificationIcon::Info)->show();
+							else if (body == "-2") Notification::create("Your request was declined", NotificationIcon::Error)->show();
+							else if (body == "-5") Notification::create("Account verification failed", NotificationIcon::Error)->show();
+							else Notification::create("Couldn't send the request", NotificationIcon::Error)->show();
+						});
 					});
 				}
 			);
@@ -470,20 +500,24 @@ class $modify(DDLevelInfo, LevelInfoLayer) {
 			"Cancel", "Set",
 			[id](FLAlertLayer*, bool yes) {
 				if (!yes) return;
-				auto req = web::WebRequest();
-				req.timeout(std::chrono::seconds(10));
-				req.header("Content-Type", "application/x-www-form-urlencoded");
-				req.bodyString(fmt::format("userID={}&levelID={}", myUserID(), id));
-				static async::TaskHolder<web::WebResponse> holder;
-				holder.spawn(req.post(serverURL("setGJDDLevel.php")), [](web::WebResponse res) {
-					auto body = res.string().unwrapOr("");
-					if (res.ok() && body == "1") {
-						Notification::create("Daily Demon set!", NotificationIcon::Success)->show();
-					} else if (body == "-2") {
-						Notification::create("Not authorised", NotificationIcon::Error)->show();
-					} else {
-						Notification::create(fmt::format("Failed ({})", body.empty() ? "no response" : body), NotificationIcon::Error)->show();
-					}
+				withAuth([id](std::string auth) {
+					auto req = web::WebRequest();
+					req.timeout(std::chrono::seconds(10));
+					req.header("Content-Type", "application/x-www-form-urlencoded");
+					req.bodyString(fmt::format("{}&levelID={}", auth, id));
+					static async::TaskHolder<web::WebResponse> holder;
+					holder.spawn(req.post(serverURL("setGJDDLevel.php")), [](web::WebResponse res) {
+						auto body = res.string().unwrapOr("");
+						if (res.ok() && body == "1") {
+							Notification::create("Daily Demon set!", NotificationIcon::Success)->show();
+						} else if (body == "-2") {
+							Notification::create("Not authorised", NotificationIcon::Error)->show();
+						} else if (body == "-5") {
+							Notification::create("Account verification failed", NotificationIcon::Error)->show();
+						} else {
+							Notification::create(fmt::format("Failed ({})", body.empty() ? "no response" : body), NotificationIcon::Error)->show();
+						}
+					});
 				});
 			}
 		);
