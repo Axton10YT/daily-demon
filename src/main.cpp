@@ -554,13 +554,49 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 				// Plain Easy Demon face. Sized relative to the tile (the tile PNG has no HD/UHD suffix,
 				// so its size in game units is not its pixel size) and kept above the lettering.
 				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) {
-					face->setScale(size.width * .50f / face->getContentSize().width);
-					face->setPosition({size.width * .472f, size.height * .60f}); // tile art is 94/199 across; the rest is its drop shadow
+					face->setScale(size.width * .58f / face->getContentSize().width);
+					face->setPosition({size.width * .472f, size.height * .53f}); // tile art is 94/199 across; the rest is its drop shadow
 					bg->addChild(face);
 				}
 
 				auto newBtn = CCMenuItemSpriteExtra::create(bg, this, menu_selector(DDCreatorLayer::onDailyDemon));
 				newBtn->setID("daily-demon-button");
+
+				// Bobbing "Daily Demon" pointer above the tile (like the game's own menu hints).
+				{
+					auto cs = newBtn->getContentSize();
+					auto hint = CCNode::create();
+					hint->setID("daily-demon-hint");
+					hint->setPosition({cs.width * .472f, cs.height * .97f}); // tip of the arrow touches the tile
+					hint->setZOrder(10);
+
+					auto label = CCLabelBMFont::create("Daily Demon", "bigFont.fnt");
+					label->setScale(.42f);
+					auto lw = label->getContentSize().width * label->getScale();
+					auto lh = label->getContentSize().height * label->getScale();
+
+					auto bubble = CCScale9Sprite::create("square02_001.png");
+					bubble->setContentSize({lw + 14.f, lh + 10.f});
+					bubble->setOpacity(190);
+					bubble->setPosition({0.f, 13.f + (lh + 10.f) / 2.f});
+					hint->addChild(bubble);
+					label->setPosition(bubble->getPosition());
+					hint->addChild(label, 1);
+
+					if (auto arrow = CCSprite::createWithSpriteFrameName("GJ_arrow_01_001.png")) {
+						arrow->setRotation(-90.f); // the sprite points left; turn it to point down at the tile
+						arrow->setScale(.38f);
+						arrow->setPosition({0.f, 7.f});
+						hint->addChild(arrow, 1);
+					}
+
+					hint->runAction(CCRepeatForever::create(CCSequence::create(
+						CCEaseSineInOut::create(CCMoveBy::create(.6f, {0.f, 4.f})),
+						CCEaseSineInOut::create(CCMoveBy::create(.6f, {0.f, -4.f})),
+						nullptr
+					)));
+					newBtn->addChild(hint);
+				}
 				newBtn->setScale(btn->getScale());
 				newBtn->m_baseScale = btn->m_baseScale; // keep the same size as the neighbouring tiles
 				newBtn->setPosition(btn->getPosition());
