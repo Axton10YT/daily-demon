@@ -132,17 +132,32 @@ namespace {
 		auto mgr = GameLevelManager::sharedState();
 		if (!mgr) return;
 		g_injected.clear();
-		if (mgr->m_dailyLevels) {
-			std::vector<CCDictElement*> bad;
-			CCDictElement* el = nullptr;
-			CCDICT_FOREACH(mgr->m_dailyLevels, el) {
-				auto lvl = static_cast<GJGameLevel*>(el->getObject());
-				if (!lvl || lvl->m_dailyID.value() >= DD_ID_OFFSET) {
-					if (lvl) lvl->m_dailyID = 0;
-					bad.push_back(el);
+		if (auto dict = mgr->m_dailyLevels) {
+			// Works for both int- and string-keyed dictionaries.
+			if (auto keys = dict->allKeys()) {
+				for (auto key : CCArrayExt<CCObject*>(keys)) {
+					bool isInt = false;
+					int intKey = 0;
+					std::string strKey;
+					CCObject* obj = nullptr;
+					if (auto i = typeinfo_cast<CCInteger*>(key)) {
+						isInt = true;
+						intKey = i->getValue();
+						obj = dict->objectForKey(intKey);
+					} else if (auto str = typeinfo_cast<CCString*>(key)) {
+						strKey = str->getCString();
+						obj = dict->objectForKey(strKey);
+					} else {
+						continue;
+					}
+					auto lvl = static_cast<GJGameLevel*>(obj);
+					if (!lvl || lvl->m_dailyID.value() >= DD_ID_OFFSET) {
+						if (lvl) lvl->m_dailyID = 0;
+						if (isInt) dict->removeObjectForKey(intKey);
+						else dict->removeObjectForKey(strKey);
+					}
 				}
 			}
-			for (auto e : bad) mgr->m_dailyLevels->removeObjectForElememt(e);
 		}
 	}
 
