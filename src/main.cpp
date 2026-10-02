@@ -13,6 +13,7 @@
 #include <Geode/modify/GameLevelManager.hpp>
 #include <Geode/modify/DailyLevelPage.hpp>
 #include <Geode/modify/LevelInfoLayer.hpp>
+#include <Geode/modify/MenuLayer.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
 #include <argon/argon.hpp>
@@ -124,27 +125,43 @@ namespace {
 	// game's save data, so they are removed when the popup closes and right before every save.
 	std::set<int> g_injected;
 
+	// Removes every trace of our synthetic daily entries from the manager, including ones that an
+	// older build already wrote into the save file (those are loaded back at startup and crash
+	// GameLevelManager::cleanupDailyLevels when it tries to look them up).
 	void purgeInjected() {
-		if (g_injected.empty()) return;
 		auto mgr = GameLevelManager::sharedState();
-		if (mgr && mgr->m_dailyLevels) {
-			for (int id : g_injected) {
-				if (auto lvl = static_cast<GJGameLevel*>(mgr->m_dailyLevels->objectForKey(id))) {
-					lvl->m_dailyID = 0;
-					mgr->m_dailyLevels->removeObjectForKey(id);
+		if (!mgr) return;
+		g_injected.clear();
+		if (mgr->m_dailyLevels) {
+			std::vector<CCDictElement*> bad;
+			CCDictElement* el = nullptr;
+			CCDICT_FOREACH(mgr->m_dailyLevels, el) {
+				auto lvl = static_cast<GJGameLevel*>(el->getObject());
+				if (!lvl || lvl->m_dailyID.value() >= DD_ID_OFFSET) {
+					if (lvl) lvl->m_dailyID = 0;
+					bad.push_back(el);
 				}
 			}
+			for (auto e : bad) mgr->m_dailyLevels->removeObjectForElememt(e);
 		}
-		g_injected.clear();
 	}
 
 	void restoreEventState() {
-		if (!g_saved.has) return;
 		auto mgr = GameLevelManager::sharedState();
-		mgr->m_eventID = g_saved.id;
-		mgr->m_eventTimeLeft = g_saved.timeLeft;
-		mgr->m_activeEventID = g_saved.active;
-		g_saved.has = false;
+		if (!mgr) return;
+		if (g_saved.has) {
+			mgr->m_eventID = g_saved.id;
+			mgr->m_eventTimeLeft = g_saved.timeLeft;
+			mgr->m_activeEventID = g_saved.active;
+			g_saved.has = false;
+		}
+		// An Event slot still holding one of our IDs (left in the save by an older build) points at a
+		// level that doesn't exist; reset it so the game never looks it up.
+		if (mgr->m_eventID >= DD_ID_OFFSET || mgr->m_activeEventID >= DD_ID_OFFSET) {
+			mgr->m_eventID = 0;
+			mgr->m_eventTimeLeft = 0;
+			mgr->m_activeEventID = 0;
+		}
 	}
 
 	void endDDMode() {
@@ -287,6 +304,18 @@ namespace {
 		);
 	}
 }
+
+// Clean any leftovers from older builds once the main menu is up (before the game can save).
+class $modify(DDMenu, MenuLayer) {
+	bool init() {
+		if (!MenuLayer::init()) return false;
+		if (!g_ddMode) {
+			purgeInjected();
+			restoreEventState();
+		}
+		return true;
+	}
+};
 
 // ---- the popup itself ---------------------------------------------------------------------
 
