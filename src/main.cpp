@@ -31,6 +31,8 @@ namespace {
 	int g_ddDailyID = 0;
 	int g_ddNumber = 0;          // "Daily Demon #N"
 	std::time_t g_ddEndsAt = 0;  // when today's demon expires (unix time)
+	int g_ddDayID = 0;           // UTC day index of the shown demon
+	int g_ddWant = 0;            // >0: browse to this numbered Daily Demon instead of today's
 
 	// Geode v5: web requests are futures; a TaskHolder aborts the task when replaced/destroyed
 	// and runs the callback on the main thread.
@@ -118,6 +120,8 @@ namespace {
 		g_ddDailyID = 0;
 		g_ddNumber = 0;
 		g_ddEndsAt = 0;
+		g_ddDayID = 0;
+		g_ddWant = 0;
 		g_ddMode = true;
 	}
 
@@ -195,6 +199,18 @@ namespace {
 	}
 
 	std::string countdownText() {
+		long today = static_cast<long>(std::time(nullptr) / 86400);
+		if (g_ddDayID > 0 && g_ddDayID != today) {
+			std::time_t t = static_cast<std::time_t>(g_ddDayID) * 86400;
+			std::tm tmv{};
+#ifdef _WIN32
+			gmtime_s(&tmv, &t);
+#else
+			gmtime_r(&t, &tmv);
+#endif
+			return fmt::format("{} {:04}-{:02}-{:02}", g_ddDayID > today ? "Scheduled for" : "Daily Demon of",
+				tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+		}
 		long left = static_cast<long>(g_ddEndsAt - std::time(nullptr));
 		if (left < 0) left = 0;
 		return fmt::format("New Daily Demon in: {:02}:{:02}:{:02}", left / 3600, (left / 60) % 60, left % 60);
@@ -259,7 +275,7 @@ namespace {
 				float y = lbl->getParent()->convertToWorldSpace(lbl->getPosition()).y;
 				if (y < lowY) { lowY = y; lowest = lbl; }
 			}
-			if (lowest && g_ddEndsAt > 0) lowest->setString(countdownText().c_str());
+			if (lowest && g_ddDayID > 0) lowest->setString(countdownText().c_str());
 		}
 		for (auto lbl : labels) {
 			std::string t = lbl->getString();
@@ -290,7 +306,7 @@ namespace {
 
 	void fetchDailyDemon() {
 		g_fetchHolder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJDailyDemon.php")),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(g_ddWant > 0 ? fmt::format("getGJDailyDemon.php?number={}", g_ddWant) : std::string("getGJDailyDemon.php"))),
 			[](web::WebResponse res) {
 				if (!g_ddMode) return;
 				if (!res.ok()) return failStatus(GJErrorCode::GenericError);
@@ -310,10 +326,11 @@ namespace {
 					if (auto n = utils::numFromString<int>(parts[3]); n.isOk()) g_ddNumber = n.unwrap();
 				}
 				g_ddEndsAt = std::time(nullptr) + left.unwrap();
+				g_ddDayID = day.unwrap();
 				g_ddDailyID = DD_ID_OFFSET + (day.unwrap() % 100000);
 
 				auto mgr = GameLevelManager::sharedState();
-				mgr->storeDailyLevelState(g_ddDailyID, left.unwrap(), GJTimedLevelType::Event);
+				mgr->storeDailyLevelState(g_ddDailyID, g_ddDayID == static_cast<int>(std::time(nullptr) / 86400) ? left.unwrap() : 86400, GJTimedLevelType::Event);
 				if (mgr->m_GJDailyLevelDelegate) mgr->m_GJDailyLevelDelegate->dailyStatusFinished(GJTimedLevelType::Event);
 			}
 		);
@@ -327,6 +344,12 @@ class $modify(DDMenu, MenuLayer) {
 		if (!g_ddMode) {
 			purgeInjected();
 			restoreEventState();
+		}
+		// Ask the server for this account's moderator status once per launch (shows a popup if you have it).
+		static bool asked = false;
+		if (!asked && GJAccountManager::get()->m_accountID > 0) {
+			asked = true;
+			GameLevelManager::sharedState()->requestUserAccess();
 		}
 		return true;
 	}
@@ -387,14 +410,58 @@ class $modify(DDPage, DailyLevelPage) {
 		return true;
 	}
 
+	static CCMenuItem* findClaim(CCNode* node) {
+		if (!node) return nullptr;
+		for (auto child : CCArrayExt<CCNode*>(node->getChildren())) {
+			if (auto item = typeinfo_cast<CCMenuItem*>(child)) {
+				if (item->m_pfnSelector == menu_selector(DailyLevelNode::onClaimReward)) return item;
+			}
+			if (auto r = findClaim(child)) return r;
+		}
+		return nullptr;
+	}
+
+	// Daily Demons have no reward to claim: swap the Claim button for "Load Next".
+	void swapClaimButton() {
+		auto claim = findClaim(m_dailyNode);
+		if (!claim || !claim->getParent()) return;
+		claim->setVisible(false);
+		claim->setEnabled(false);
+		if (claim->getParent()->getChildByID("dd-next-button")) return;
+		auto spr = ButtonSprite::create("Load Next", "goldFont.fnt", "GJ_button_01.png", .7f);
+		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(DDPage::onLoadNext));
+		btn->setID("dd-next-button");
+		btn->setPosition(claim->getPosition());
+		claim->getParent()->addChild(btn);
+	}
+
+	void onLoadNext(CCObject*) {
+		int next = (g_ddNumber > 0 ? g_ddNumber : 1) + 1;
+		Ref<DDPage> self = this;
+		static async::TaskHolder<web::WebResponse> holder;
+		holder.spawn(
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(fmt::format("getGJDailyDemon.php?number={}", next))),
+			[self, next](web::WebResponse res) {
+				auto body = res.string().unwrapOr("");
+				if (!res.ok() || utils::string::split(body, "|").size() < 3) {
+					return Notification::create("That's the latest Daily Demon", NotificationIcon::Info)->show();
+				}
+				self->onClose(nullptr);   // restores the real Event state
+				beginDDMode();
+				g_ddWant = next;
+				DailyLevelPage::create(GJTimedLevelType::Event)->show();
+			}
+		);
+	}
+
 	void createDailyNode(GJGameLevel* level, bool instant, float delay, bool isNew) {
 		DailyLevelPage::createDailyNode(level, instant, delay, isNew);
-		if (m_fields->m_isDD) tidyDDPage(this, m_mainLayer);
+		if (m_fields->m_isDD) { tidyDDPage(this, m_mainLayer); swapClaimButton(); }
 	}
 
 	void updateTimers(float dt) {
 		DailyLevelPage::updateTimers(dt);
-		if (m_fields->m_isDD) tidyDDPage(this, m_mainLayer);
+		if (m_fields->m_isDD) { tidyDDPage(this, m_mainLayer); swapClaimButton(); }
 	}
 
 	void onClose(CCObject* sender) {
@@ -470,6 +537,28 @@ class $modify(DDPage, DailyLevelPage) {
 };
 
 class $modify(DDManager, GameLevelManager) {
+	// The game's own "requestUserAccess" answer: 1 = Moderator, 2 = Elder Moderator, <=0 = none.
+	void onRequestUserAccessCompleted(gd::string response, gd::string tag) {
+		GameLevelManager::onRequestUserAccessCompleted(response, tag);
+		auto lvl = utils::numFromString<int>(std::string(response)).unwrapOr(0);
+		auto mod = Mod::get();
+		if (lvl <= 0) {
+			mod->setSavedValue<int>("shown-mod-level", 0);
+			return;
+		}
+		if (lvl > mod->getSavedValue<int>("shown-mod-level", 0)) {
+			mod->setSavedValue<int>("shown-mod-level", lvl);
+			queueInMainThread([lvl] {
+				FLAlertLayer::create(
+					lvl >= 2 ? "Elder Moderator!" : "Moderator!",
+					lvl >= 2 ? "Congrats! You have got <cy>Geometry Dash Elder Moderator</c>!"
+					         : "Congrats! You have got <cy>Geometry Dash Moderator</c>!",
+					"OK"
+				)->show();
+			});
+		}
+	}
+
 	void encodeDataTo(DS_Dictionary* dict) {
 		// Saving on exit: make sure none of our temporary state is written/cleaned up.
 		purgeInjected();
@@ -606,41 +695,6 @@ class $modify(DDCreatorLayer, CreatorLayer) {
 				auto newBtn = CCMenuItemSpriteExtra::create(bg, this, menu_selector(DDCreatorLayer::onDailyDemon));
 				newBtn->setID("daily-demon-button");
 
-				// Bobbing "Daily Demon" pointer above the tile (like the game's own menu hints).
-				{
-					auto cs = newBtn->getContentSize();
-					auto hint = CCNode::create();
-					hint->setID("daily-demon-hint");
-					hint->setPosition({cs.width * .472f, cs.height * .97f}); // tip of the arrow touches the tile
-					hint->setZOrder(10);
-
-					auto label = CCLabelBMFont::create("Daily Demon", "bigFont.fnt");
-					label->setScale(.42f);
-					auto lw = label->getContentSize().width * label->getScale();
-					auto lh = label->getContentSize().height * label->getScale();
-
-					auto bubble = CCScale9Sprite::create("square02_001.png");
-					bubble->setContentSize({lw + 14.f, lh + 10.f});
-					bubble->setOpacity(190);
-					bubble->setPosition({0.f, 13.f + (lh + 10.f) / 2.f});
-					hint->addChild(bubble);
-					label->setPosition(bubble->getPosition());
-					hint->addChild(label, 1);
-
-					if (auto arrow = CCSprite::createWithSpriteFrameName("GJ_arrow_01_001.png")) {
-						arrow->setRotation(-90.f); // the sprite points left; turn it to point down at the tile
-						arrow->setScale(.38f);
-						arrow->setPosition({0.f, 7.f});
-						hint->addChild(arrow, 1);
-					}
-
-					hint->runAction(CCRepeatForever::create(CCSequence::create(
-						CCEaseSineInOut::create(CCMoveBy::create(.6f, {0.f, 4.f})),
-						CCEaseSineInOut::create(CCMoveBy::create(.6f, {0.f, -4.f})),
-						nullptr
-					)));
-					newBtn->addChild(hint);
-				}
 				newBtn->setScale(btn->getScale());
 				newBtn->m_baseScale = btn->m_baseScale; // keep the same size as the neighbouring tiles
 				newBtn->setPosition(btn->getPosition());
