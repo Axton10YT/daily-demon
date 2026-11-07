@@ -2,13 +2,14 @@
 //
 // The popup is the game's own DailyLevelPage opened as the Event type, so it looks and behaves
 // like the Event level popup. While that popup is open ("HL mode") three calls are redirected:
-//   GameLevelManager::getGJDailyLevelState(Event) -> GET {server}/getGJHourlyLevel.php  ("hourID|secondsLeft|levelID|number")
+//   GameLevelManager::getGJDailyLevelState(Event) -> GET {server}/getGJDailyDemon.php  ("hourID|secondsLeft|levelID|number")
 //   GameLevelManager::downloadLevel(<negative id>, .., dailyID) -> downloads the real levelID from the endpoint
 //   DailyLevelPage::levelDownloadFinished          -> tags the level with a daily ID so the node is built
 //
-// Users listed by getGJHLIDs.php also get a "Set HL" button on level pages that POSTs to setGJHLLevel.php.
+// Users listed by getGJDDIDs.php also get a "Set HL" button on level pages that POSTs to setGJDDLevel.php.
 //
 // Geode v6 port notes:
+//  - uses the same server endpoints as Daily Demon (the server decides when the level changes)
 //  - needs C++23 and Geode >= 6.0.0-alpha.1 (GD 2.2091)
 //  - gd::string is gone in v6, so nothing here relies on it (the old moderator-popup hook that took
 //    gd::string arguments belonged to Daily Demon and was dropped)
@@ -30,14 +31,13 @@ using namespace geode::prelude;
 namespace {
 	// Offset keeps our daily ID clear of any real Event IDs stored by the game (and of Daily Demon's 700000+).
 	constexpr int HL_ID_OFFSET = 900000;
-	constexpr int HOUR = 3600;
 
 	bool g_hlMode = false;
 	int g_hlLevelID = 0;
 	int g_hlDailyID = 0;
 	int g_hlNumber = 0;          // "Hourly Level #N"
 	std::time_t g_hlEndsAt = 0;  // when the current hourly level expires (unix time)
-	int g_hlHourID = 0;          // UTC hour index of the shown level
+	int g_hlHourID = 0;          // period ID the server returned for the shown level
 	int g_hlWant = 0;            // >0: browse to this numbered Hourly Level instead of the current one
 
 	// Web requests are futures; a TaskHolder aborts the task when replaced/destroyed
@@ -92,7 +92,7 @@ namespace {
 		if (g_allowed != 0) return cb(g_allowed > 0);
 		if (serverBase().empty()) return cb(false);
 		g_idsHolder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(8)).get(serverURL("getGJHLIDs.php")),
+			web::WebRequest().timeout(std::chrono::seconds(8)).get(serverURL("getGJDDIDs.php")),
 			[cb](web::WebResponse res) {
 				bool ok = false;
 				if (res.ok()) {
@@ -209,21 +209,11 @@ namespace {
 	}
 
 	std::string countdownText() {
-		long thisHour = static_cast<long>(std::time(nullptr) / HOUR);
-		if (g_hlHourID > 0 && g_hlHourID != thisHour) {
-			std::time_t t = static_cast<std::time_t>(g_hlHourID) * HOUR;
-			std::tm tmv{};
-#ifdef _WIN32
-			gmtime_s(&tmv, &t);
-#else
-			gmtime_r(&t, &tmv);
-#endif
-			return fmt::format("{} {:04}-{:02}-{:02} {:02}:00 UTC", g_hlHourID > thisHour ? "Scheduled for" : "Hourly Level of",
-				tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour);
-		}
+		// Browsing an older numbered level: no countdown, just which one it is.
+		if (g_hlWant > 0) return fmt::format("Hourly Level #{}", g_hlWant);
 		long left = static_cast<long>(g_hlEndsAt - std::time(nullptr));
 		if (left < 0) left = 0;
-		return fmt::format("New Hourly Level in: {:02}:{:02}", left / 60, left % 60);
+		return fmt::format("New Hourly Level in: {:02}:{:02}:{:02}", left / 3600, (left / 60) % 60, left % 60);
 	}
 
 	void collectLabels(CCNode* node, std::vector<CCLabelBMFont*>& out) {
@@ -316,7 +306,7 @@ namespace {
 
 	void fetchHourlyLevel() {
 		g_fetchHolder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(g_hlWant > 0 ? fmt::format("getGJHourlyLevel.php?number={}", g_hlWant) : std::string("getGJHourlyLevel.php"))),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(g_hlWant > 0 ? fmt::format("getGJDailyDemon.php?number={}", g_hlWant) : std::string("getGJDailyDemon.php"))),
 			[](web::WebResponse res) {
 				if (!g_hlMode) return;
 				if (!res.ok()) return failStatus(GJErrorCode::GenericError);
@@ -340,8 +330,7 @@ namespace {
 				g_hlDailyID = HL_ID_OFFSET + (hour.unwrap() % 100000);
 
 				auto mgr = GameLevelManager::sharedState();
-				bool isCurrent = g_hlHourID == static_cast<int>(std::time(nullptr) / HOUR);
-				mgr->storeDailyLevelState(g_hlDailyID, isCurrent ? left.unwrap() : HOUR, GJTimedLevelType::Event);
+				mgr->storeDailyLevelState(g_hlDailyID, g_hlWant > 0 ? 86400 : left.unwrap(), GJTimedLevelType::Event);
 				if (mgr->m_GJDailyLevelDelegate) mgr->m_GJDailyLevelDelegate->dailyStatusFinished(GJTimedLevelType::Event);
 			}
 		);
@@ -445,7 +434,7 @@ class $modify(HLPage, DailyLevelPage) {
 		Ref<HLPage> self = this;
 		static async::TaskHolder<web::WebResponse> holder;
 		holder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(fmt::format("getGJHourlyLevel.php?number={}", next))),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(fmt::format("getGJDailyDemon.php?number={}", next))),
 			[self, next](web::WebResponse res) {
 				auto body = res.string().unwrapOr("");
 				if (!res.ok() || utils::string::split(body, "|").size() < 3) {
@@ -491,7 +480,7 @@ class $modify(HLPage, DailyLevelPage) {
 						req.header("Content-Type", "application/x-www-form-urlencoded");
 						req.bodyString(auth);
 						static async::TaskHolder<web::WebResponse> holder;
-						holder.spawn(req.post(serverURL("requestGJHLAccess.php")), [](web::WebResponse res) {
+						holder.spawn(req.post(serverURL("requestGJDDAccess.php")), [](web::WebResponse res) {
 							auto body = res.string().unwrapOr("");
 							if (res.ok() && body == "1") Notification::create("Request sent!", NotificationIcon::Success)->show();
 							else if (body == "3") Notification::create("Your request is already pending", NotificationIcon::Info)->show();
@@ -512,7 +501,7 @@ class $modify(HLPage, DailyLevelPage) {
 		Ref<HLPage> self = this;
 		static async::TaskHolder<web::WebResponse> holder;
 		holder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJHLList.php")),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJDDList.php")),
 			[self](web::WebResponse res) {
 				auto body = res.string().unwrapOr("");
 				if (!res.ok() || body.empty() || body == "-1") {
@@ -622,7 +611,7 @@ class $modify(HLLevelInfo, LevelInfoLayer) {
 					req.header("Content-Type", "application/x-www-form-urlencoded");
 					req.bodyString(fmt::format("{}&levelID={}", auth, id));
 					static async::TaskHolder<web::WebResponse> holder;
-					holder.spawn(req.post(serverURL("setGJHLLevel.php")), [](web::WebResponse res) {
+					holder.spawn(req.post(serverURL("setGJDDLevel.php")), [](web::WebResponse res) {
 						auto body = res.string().unwrapOr("");
 						if (res.ok() && body == "1") {
 							Notification::create("Hourly Level set!", NotificationIcon::Success)->show();

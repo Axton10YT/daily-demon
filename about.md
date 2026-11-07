@@ -5,16 +5,16 @@ A new level, every hour. **Hourly Level** replaces the **Map Pack** button in th
 ## Features
 - **New Creator menu button**: the Map Pack tile is swapped for an Hourly Level tile with a clock.
 - **Event-style popup**: same look, timer and level card as the Event level popup, retitled *Hourly Level*.
-- **Resets every hour (UTC)**: the countdown shows how long is left on the current level.
+- **Countdown**: shows how long is left on the current level, as reported by the server.
 - **Load Next**: step through numbered Hourly Levels from the popup.
 - **The Safe**: lists every level that has ever been an Hourly Level.
 - **Level setters**: trusted users get a **Set HL** button on level pages to choose the Hourly Level by level ID. Everyone else never sees it.
 
 ## How it works
-The popup fetches the current level from the Hourly Level server and downloads it through the normal level download, so it works like any other daily-style level. If nothing has been set for this hour, the popup tells you so.
+The popup fetches the current level from the Hourly Level server and downloads it through the normal level download, so it works like any other daily-style level. If nothing is currently set, the popup tells you so.
 
 ## Settings
-- **Server**: base URL of the Hourly Level server. This has to be set before the button does anything.
+- **Server**: base URL of the Hourly Level server (defaults to the official one).
 
 ## Notes
 - Needs an internet connection.

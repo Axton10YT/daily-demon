@@ -6,15 +6,15 @@ Ported from [Daily Demon](https://github.com/Axton10YT/daily-demon) (`geode-5-po
 
 ## Server protocol
 
-Set the **Server** setting to your base URL. The mod calls these endpoints (all under `{server}/`):
+The **Server** setting defaults to the existing Daily Demon server, which uses the same endpoints. The mod calls these endpoints (all under `{server}/`):
 
 | Endpoint | Method | Response |
 |---|---|---|
-| `getGJHourlyLevel.php[?number=N]` | GET | `hourID\|secondsLeft\|levelID\|number` — `hourID` is the UTC hour index (`unix / 3600`). `-1` when nothing is set. |
-| `getGJHLIDs.php` | GET | Any text containing the account/user IDs allowed to set levels (digits separated by anything). |
-| `setGJHLLevel.php` | POST `accountID`, `authtoken`, `levelID` | `1` ok, `-2` not authorised, `-5` auth failed |
-| `requestGJHLAccess.php` | POST `accountID`, `authtoken` | `1` sent, `2` already has access, `3` pending, `-2` declined, `-5` auth failed |
-| `getGJHLList.php` | GET | Comma-separated level IDs of every past Hourly Level (`-1` if none) |
+| `getGJDailyDemon.php[?number=N]` | GET | `periodID\|secondsLeft\|levelID\|number` — `secondsLeft` drives the countdown, so the server decides how long each level lasts. `-1` when nothing is set. |
+| `getGJDDIDs.php` | GET | Any text containing the account/user IDs allowed to set levels (digits separated by anything). |
+| `setGJDDLevel.php` | POST `accountID`, `authtoken`, `levelID` | `1` ok, `-2` not authorised, `-5` auth failed |
+| `requestGJDDAccess.php` | POST `accountID`, `authtoken` | `1` sent, `2` already has access, `3` pending, `-2` declined, `-5` auth failed |
+| `getGJDDList.php` | GET | Comma-separated level IDs of every past Hourly Level (`-1` if none) |
 
 `authtoken` comes from [Argon](https://github.com/GlobedGD/argon); the password/GJP is never sent.
 

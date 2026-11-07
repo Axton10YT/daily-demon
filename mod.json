@@ -19,8 +19,8 @@
 		"server": {
 			"type": "string",
 			"name": "Server",
-			"description": "Base URL of the Hourly Level server (for example https://example.com). Required: the popup stays closed until this is set.",
-			"default": "",
+			"description": "Base URL of the Hourly Level server.",
+			"default": "https://cheesegd.com",
 			"platforms": [
 				"win",
 				"android",
