@@ -57,6 +57,13 @@ jobs:
           rm -rf ninja ninja.zip my-epic-geode-cli geode-sdk-clone
           # forget the CLI's profile registration (it would refuse to add it again) but keep cli-profile/, which holds the installed Argon
           rm -rf "$HOME/.local/share/Geode" "$HOME/Library/Application Support/Geode" "${LOCALAPPDATA:-/nonexistent}/Geode"
+      - name: Install Argon v2 for the mod build
+        shell: bash
+        # build-geode-mod packages mods without installing them, so put the .geode where the dependency check looks
+        run: |
+          mkdir -p cli-profile/geode/mods
+          cp argon-src/build/dankmeme.argon.geode cli-profile/geode/mods/
+          ls -la cli-profile/geode/mods
       - name: Build the mod
         uses: geode-sdk/build-geode-mod@main
         with:
