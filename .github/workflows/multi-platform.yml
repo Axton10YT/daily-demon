@@ -54,7 +54,7 @@ jobs:
         run: |
           sccache --stop-server || true
           # the action unpacks ninja/the CLI into the workspace; 7z would prompt to overwrite on the second run
-          rm -rf ninja ninja.zip my-epic-geode-cli geode-sdk-clone
+          rm -rf ninja ninja.zip my-epic-geode-cli geode-sdk-clone output
           # forget the CLI's profile registration (it would refuse to add it again) but keep cli-profile/, which holds the installed Argon
           rm -rf "$HOME/.local/share/Geode" "$HOME/Library/Application Support/Geode" "${LOCALAPPDATA:-/nonexistent}/Geode"
       - name: Install Argon v2 for the mod build
