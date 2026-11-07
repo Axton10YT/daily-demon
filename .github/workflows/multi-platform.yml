@@ -13,11 +13,8 @@ jobs:
         config:
           - name: Windows
             os: windows-latest
-          - name: macOS
-            os: macos-latest
-          - name: iOS
-            os: macos-latest
-            target: iOS
+          # macOS and iOS are left out until the 2.2091 bindings have addresses for the hooked
+          # DailyLevelPage / GameLevelManager functions on those platforms.
           - name: Android32
             os: ubuntu-latest
             target: Android32

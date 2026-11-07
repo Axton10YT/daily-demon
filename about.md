@@ -20,4 +20,4 @@ The popup fetches the current level from the Hourly Level server and downloads i
 - Needs an internet connection.
 - The chosen level has to exist on the server your game is connected to.
 - Only the Map Pack button is touched. Nothing else in the Creator menu moves.
-- Built for Geode v6 (Geometry Dash 2.2091).
+- Built for Geode v6 (Geometry Dash 2.2091). Windows and Android only for now: the macOS/iOS bindings for 2.2091 are still missing the functions this mod hooks.
