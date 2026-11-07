@@ -22,7 +22,7 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
-#include <argon/argon.hpp>
+#include <dankmeme.argon/argon.hpp>
 #include <ctime>
 #include <set>
 
@@ -80,7 +80,7 @@ namespace {
 		}
 		auto account = argon::getGameAccountData();
 		Notification::create("Verifying your account...", NotificationIcon::Loading, 1.5f)->show();
-		g_authHolder.spawn(argon::startAuth(account), [cb, account](Result<std::string> res) {
+		g_authHolder.spawn(argon::startAuth(), [cb, account](Result<std::string> res) {
 			if (res.isErr()) {
 				return Notification::create("Account verification failed", NotificationIcon::Error)->show();
 			}

@@ -21,7 +21,4 @@ add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 
 setup_geode_mod(${PROJECT_NAME})
 
-# Argon: GD account auth that never sends the password/GJP to a third party.
-# If this fails to configure against Geode v6, bump to Argon's newest release.
-CPMAddPackage("gh:GlobedGD/argon@1.5.1")
-target_link_libraries(${PROJECT_NAME} argon)
+# Argon v2 is a Geode mod, not a CMake package: it is declared under "dependencies" in mod.json.

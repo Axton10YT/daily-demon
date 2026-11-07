@@ -10,6 +10,9 @@
 	"id": "axton10yt.hourly-level",
 	"name": "Hourly Level",
 	"description": "Replaces the Map Pack button with an Hourly Level button: a new level every hour in an Event-style popup.",
+	"dependencies": {
+		"dankmeme.argon": ">=2.0.0"
+	},
 	"resources": {
 		"sprites": [
 			"resources/*.png"
