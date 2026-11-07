@@ -2,11 +2,13 @@
 //
 // The popup is the game's own DailyLevelPage opened as the Event type, so it looks and behaves
 // like the Event level popup. While that popup is open ("HL mode") three calls are redirected:
-//   GameLevelManager::getGJDailyLevelState(Event) -> GET {server}/getGJDailyDemon.php  ("hourID|secondsLeft|levelID|number")
+//   GameLevelManager::getGJDailyLevelState(Event) -> GET {server}/getGJHourlyLevel.php  ("hourID|secondsLeft|levelID|number")
 //   GameLevelManager::downloadLevel(<negative id>, .., dailyID) -> downloads the real levelID from the endpoint
 //   DailyLevelPage::levelDownloadFinished          -> tags the level with a daily ID so the node is built
 //
-// Users listed by getGJDDIDs.php also get a "Set HL" button on level pages that POSTs to setGJDDLevel.php.
+// Setting the Hourly Level: a lock button on level pages asks for a PIN (checked by validateGJHLPIN.php),
+// then offers "set as Hourly Level". The set request carries the PIN again plus the player's accountID and
+// userID, and the server checks them against its whitelist of allowed account IDs (setGJHLLevel.php).
 //
 // Geode v6 port notes:
 //  - uses the same server endpoints as Daily Demon (the server decides when the level changes)
@@ -22,7 +24,7 @@
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/utils/web.hpp>
 #include <Geode/utils/async.hpp>
-#include <dankmeme.argon/argon.hpp>
+#include <Geode/ui/TextInput.hpp>
 #include <ctime>
 #include <set>
 
@@ -43,11 +45,6 @@ namespace {
 	// Web requests are futures; a TaskHolder aborts the task when replaced/destroyed
 	// and runs the callback on the main thread.
 	async::TaskHolder<web::WebResponse> g_fetchHolder;
-	async::TaskHolder<web::WebResponse> g_idsHolder;
-	async::TaskHolder<Result<std::string>> g_authHolder;
-
-	// 0 = unknown/loading, 1 = allowed, -1 = not allowed
-	int g_allowed = 0;
 
 	std::string serverBase() {
 		auto base = Mod::get()->getSettingValue<std::string>("server");
@@ -59,60 +56,96 @@ namespace {
 		return serverBase() + "/" + path;
 	}
 
-	int myUserID() {
-		return GameManager::get()->m_playerUserID.value();
+	// ---- level setters: PIN -> menu -> set ------------------------------------------------------
+
+	std::string g_hlPin;  // kept for this game session once the server has accepted it
+	async::TaskHolder<web::WebResponse> g_pinHolder;
+	async::TaskHolder<web::WebResponse> g_setHolder;
+
+	web::WebRequest formPost(std::string const& body) {
+		auto req = web::WebRequest();
+		req.timeout(std::chrono::seconds(10));
+		req.header("Content-Type", "application/x-www-form-urlencoded");
+		req.bodyString(body);
+		return req;
 	}
 
-	std::string urlEncode(std::string const& in) {
-		std::string out;
-		for (unsigned char c : in) {
-			if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') out += static_cast<char>(c);
-			else out += fmt::format("%{:02X}", c);
-		}
-		return out;
-	}
-
-	// Proves account ownership through Argon (no password/GJP is ever sent), then calls cb with the
-	// POST body prefix "accountID=..&authtoken=..". Shows a notification and does nothing on failure.
-	void withAuth(std::function<void(std::string)> cb) {
-		if (!argon::signedIn()) {
+	void setHourlyLevel(int levelID) {
+		int accountID = GJAccountManager::get()->m_accountID;
+		int userID = GameManager::get()->m_playerUserID.value();
+		if (accountID <= 0 || userID <= 0) {
 			return Notification::create("Log into your GD account first", NotificationIcon::Error)->show();
 		}
-		auto account = argon::getGameAccountData();
-		Notification::create("Verifying your account...", NotificationIcon::Loading, 1.5f)->show();
-		g_authHolder.spawn(argon::startAuth(), [cb, account](Result<std::string> res) {
-			if (res.isErr()) {
-				return Notification::create("Account verification failed", NotificationIcon::Error)->show();
-			}
-			cb(fmt::format("accountID={}&authtoken={}", account.accountId, urlEncode(res.unwrap())));
-		});
-	}
-
-	void checkAllowed(std::function<void(bool)> cb) {
-		if (g_allowed != 0) return cb(g_allowed > 0);
-		if (serverBase().empty()) return cb(false);
-		g_idsHolder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(8)).get(serverURL("getGJDDIDs.php")),
-			[cb](web::WebResponse res) {
-				bool ok = false;
-				if (res.ok()) {
-					auto body = res.string().unwrapOr("");
-					std::string tok;
-					auto flush = [&]() {
-						if (!tok.empty()) {
-							if (auto id = utils::numFromString<int>(tok); id.isOk() && id.unwrap() == myUserID()) ok = true;
-							tok.clear();
-						}
-					};
-					for (char c : body) {
-						if (c >= '0' && c <= '9') tok += c; else flush();
-					}
-					flush();
-					g_allowed = ok ? 1 : -1;
+		g_setHolder.spawn(
+			formPost(fmt::format("pin={}&accountID={}&userID={}&levelID={}", g_hlPin, accountID, userID, levelID)).post(serverURL("setGJHLLevel.php")),
+			[](web::WebResponse res) {
+				auto body = res.string().unwrapOr("");
+				if (res.ok() && body == "1") {
+					Notification::create("Hourly Level set!", NotificationIcon::Success)->show();
+				} else if (body == "-2") {
+					Notification::create("Your account isn't allowed to set Hourly Levels", NotificationIcon::Error)->show();
+				} else if (body == "-6") {
+					g_hlPin.clear(); // the PIN changed on the server: ask again next time
+					Notification::create("PIN rejected, unlock again", NotificationIcon::Error)->show();
+				} else if (body == "-7") {
+					Notification::create("Account and user ID don't match", NotificationIcon::Error)->show();
+				} else if (body == "2") {
+					Notification::create("Too many attempts, try again later", NotificationIcon::Error)->show();
+				} else {
+					Notification::create(fmt::format("Failed ({})", body.empty() ? "no response" : body), NotificationIcon::Error)->show();
 				}
-				cb(ok);
 			}
 		);
+	}
+
+	// The menu you get once the PIN has been accepted.
+	void showSetMenu(int levelID, std::string name) {
+		createQuickPopup(
+			"Hourly Level",
+			fmt::format("<cy>{}</c> ({})\n\nSet this level as the current Hourly Level?", name, levelID),
+			"Cancel", "Set",
+			[levelID](FLAlertLayer*, bool yes) {
+				if (yes) setHourlyLevel(levelID);
+			}
+		);
+	}
+
+	void promptPin(int levelID, std::string name) {
+		auto input = TextInput::create(180.f, "PIN", "bigFont.fnt");
+		input->setFilter("0123456789");
+		input->setMaxCharCount(12);
+		input->setPasswordMode(true);
+		Ref<TextInput> inputRef = input;
+		auto alert = createQuickPopup(
+			"Hourly Level",
+			"Enter the PIN to set Hourly Levels:\n\n\n",
+			"Cancel", "Unlock", 320.f,
+			[inputRef, levelID, name](FLAlertLayer*, bool yes) {
+				if (!yes) return;
+				std::string pin = inputRef->getString();
+				if (pin.empty()) return;
+				g_pinHolder.spawn(
+					formPost(fmt::format("pin={}", pin)).post(serverURL("validateGJHLPIN.php")),
+					[pin, levelID, name](web::WebResponse res) {
+						auto body = res.string().unwrapOr("");
+						if (res.ok() && body == "1") {
+							g_hlPin = pin;
+							showSetMenu(levelID, name);
+						} else if (body == "2") {
+							Notification::create("Too many attempts, try again later", NotificationIcon::Error)->show();
+						} else {
+							Notification::create("Wrong PIN", NotificationIcon::Error)->show();
+						}
+					}
+				);
+			},
+			false
+		);
+		auto win = CCDirector::get()->getWinSize();
+		input->setPosition({win.width / 2.f, win.height / 2.f - 8.f});
+		alert->m_mainLayer->addChild(input);
+		handleTouchPriority(alert);
+		alert->show();
 	}
 
 	// The popup borrows the game's Event slot. Stash the real Event state while it is open
@@ -306,7 +339,7 @@ namespace {
 
 	void fetchHourlyLevel() {
 		g_fetchHolder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(g_hlWant > 0 ? fmt::format("getGJDailyDemon.php?number={}", g_hlWant) : std::string("getGJDailyDemon.php"))),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(g_hlWant > 0 ? fmt::format("getGJHourlyLevel.php?number={}", g_hlWant) : std::string("getGJHourlyLevel.php"))),
 			[](web::WebResponse res) {
 				if (!g_hlMode) return;
 				if (!res.ok()) return failStatus(GJErrorCode::GenericError);
@@ -370,12 +403,10 @@ class $modify(HLPage, DailyLevelPage) {
 					auto logo = CCSprite::create(Mod::get()->expandSpriteName("HL_title.png").c_str());
 					if (logo && m_buttonMenu) {
 						logo->setScale(150.f / logo->getContentSize().width);
-						// Tapping the logo requests permission to set Hourly Levels.
-						auto btn = CCMenuItemSpriteExtra::create(logo, this, menu_selector(HLPage::onLogo));
-						btn->setID("hl-logo");
+						logo->setID("hl-logo");
 						auto world = spr->getParent()->convertToWorldSpace(spr->getPosition());
-						btn->setPosition(m_buttonMenu->convertToNodeSpace(world));
-						m_buttonMenu->addChild(btn);
+						logo->setPosition(m_buttonMenu->convertToNodeSpace(world));
+						m_buttonMenu->addChild(logo);
 					}
 					spr->setVisible(false);
 					break;
@@ -434,7 +465,7 @@ class $modify(HLPage, DailyLevelPage) {
 		Ref<HLPage> self = this;
 		static async::TaskHolder<web::WebResponse> holder;
 		holder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(fmt::format("getGJDailyDemon.php?number={}", next))),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(fmt::format("getGJHourlyLevel.php?number={}", next))),
 			[self, next](web::WebResponse res) {
 				auto body = res.string().unwrapOr("");
 				if (!res.ok() || utils::string::split(body, "|").size() < 3) {
@@ -463,45 +494,13 @@ class $modify(HLPage, DailyLevelPage) {
 		DailyLevelPage::onClose(sender);
 	}
 
-	void onLogo(CCObject*) {
-		checkAllowed([](bool ok) {
-			if (ok) {
-				return Notification::create("You can already set Hourly Levels (use Set HL on a level page)", NotificationIcon::Info)->show();
-			}
-			createQuickPopup(
-				"Hourly Level",
-				"Want to be able to <cy>set Hourly Levels</c>? Send a request and it will be reviewed.",
-				"Cancel", "Request",
-				[](FLAlertLayer*, bool yes) {
-					if (!yes) return;
-					withAuth([](std::string auth) {
-						auto req = web::WebRequest();
-						req.timeout(std::chrono::seconds(10));
-						req.header("Content-Type", "application/x-www-form-urlencoded");
-						req.bodyString(auth);
-						static async::TaskHolder<web::WebResponse> holder;
-						holder.spawn(req.post(serverURL("requestGJDDAccess.php")), [](web::WebResponse res) {
-							auto body = res.string().unwrapOr("");
-							if (res.ok() && body == "1") Notification::create("Request sent!", NotificationIcon::Success)->show();
-							else if (body == "3") Notification::create("Your request is already pending", NotificationIcon::Info)->show();
-							else if (body == "2") Notification::create("You already have access", NotificationIcon::Info)->show();
-							else if (body == "-2") Notification::create("Your request was declined", NotificationIcon::Error)->show();
-							else if (body == "-5") Notification::create("Account verification failed", NotificationIcon::Error)->show();
-							else Notification::create("Couldn't send the request", NotificationIcon::Error)->show();
-						});
-					});
-				}
-			);
-		});
-	}
-
 	void onTheSafe(CCObject* sender) {
 		if (!m_fields->m_isHL) return DailyLevelPage::onTheSafe(sender);
 		// The Safe lists every level that was ever an Hourly Level.
 		Ref<HLPage> self = this;
 		static async::TaskHolder<web::WebResponse> holder;
 		holder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJDDList.php")),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJHLList.php")),
 			[self](web::WebResponse res) {
 				auto body = res.string().unwrapOr("");
 				if (!res.ok() || body.empty() || body == "-1") {
@@ -561,12 +560,12 @@ class $modify(HLManager, GameLevelManager) {
 	}
 };
 
-// ---- "Set as Hourly Level" button on level pages (whitelisted users only) -------------------
+// ---- level pages: "(Event)" -> "(Hourly Level)" and the lock button for level setters ------------
 
 class $modify(HLLevelInfo, LevelInfoLayer) {
 	bool init(GJGameLevel* level, bool challenge) {
 		if (!LevelInfoLayer::init(level, challenge)) return false;
-		if (!level || level->m_levelID.value() <= 0) return true;
+		if (!level) return true;
 		if (level->m_dailyID.value() >= HL_ID_OFFSET) {
 			std::vector<CCLabelBMFont*> labels;
 			collectLabels(this, labels);
@@ -574,58 +573,34 @@ class $modify(HLLevelInfo, LevelInfoLayer) {
 				if (lower(lbl->getString()).find("(event)") != std::string::npos) lbl->setString("(Hourly Level)");
 			}
 		}
-		Ref<HLLevelInfo> self = this;
-		checkAllowed([self](bool ok) {
-			if (!ok) return;
-			queueInMainThread([self] { self->addHLButton(); });
-		});
+		if (level->m_levelID.value() > 0 && !serverBase().empty()) this->addLockButton();
 		return true;
 	}
 
-	void addHLButton() {
-		if (!this->getParent() || this->getChildByID("hl-menu")) return;
+	void addLockButton() {
 		auto menu = CCMenu::create();
 		menu->setID("hl-menu");
 		menu->setPosition({0.f, 0.f});
-		auto spr = ButtonSprite::create("Set HL", "goldFont.fnt", "GJ_button_04.png", .6f);
-		spr->setScale(.7f);
-		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(HLLevelInfo::onSetHL));
-		btn->setID("set-hourly-level-button");
+		// The game's own lock icon, so it matches the rest of the UI.
+		CCNode* spr = CCSprite::createWithSpriteFrameName("GJ_lock_001.png");
+		if (spr) {
+			spr->setScale(.9f);
+		} else {
+			spr = ButtonSprite::create("Lock", "goldFont.fnt", "GJ_button_04.png", .6f);
+		}
+		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(HLLevelInfo::onLock));
+		btn->setID("hourly-level-lock-button");
 		auto win = CCDirector::get()->getWinSize();
-		btn->setPosition({win.width - 40.f, 34.f});
+		btn->setPosition({win.width - 30.f, 30.f});
 		menu->addChild(btn);
 		this->addChild(menu, 10);
 	}
 
-	void onSetHL(CCObject*) {
+	void onLock(CCObject*) {
 		int id = m_level->m_levelID.value();
-		createQuickPopup(
-			"Hourly Level",
-			fmt::format("Set <cy>{}</c> as the current Hourly Level?", std::string(m_level->m_levelName)),
-			"Cancel", "Set",
-			[id](FLAlertLayer*, bool yes) {
-				if (!yes) return;
-				withAuth([id](std::string auth) {
-					auto req = web::WebRequest();
-					req.timeout(std::chrono::seconds(10));
-					req.header("Content-Type", "application/x-www-form-urlencoded");
-					req.bodyString(fmt::format("{}&levelID={}", auth, id));
-					static async::TaskHolder<web::WebResponse> holder;
-					holder.spawn(req.post(serverURL("setGJDDLevel.php")), [](web::WebResponse res) {
-						auto body = res.string().unwrapOr("");
-						if (res.ok() && body == "1") {
-							Notification::create("Hourly Level set!", NotificationIcon::Success)->show();
-						} else if (body == "-2") {
-							Notification::create("Not authorised", NotificationIcon::Error)->show();
-						} else if (body == "-5") {
-							Notification::create("Account verification failed", NotificationIcon::Error)->show();
-						} else {
-							Notification::create(fmt::format("Failed ({})", body.empty() ? "no response" : body), NotificationIcon::Error)->show();
-						}
-					});
-				});
-			}
-		);
+		std::string name = m_level->m_levelName;
+		if (g_hlPin.empty()) promptPin(id, name);
+		else showSetMenu(id, name);
 	}
 };
 

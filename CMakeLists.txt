@@ -20,5 +20,3 @@ endif()
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 
 setup_geode_mod(${PROJECT_NAME})
-
-# Argon v2 is a Geode mod, not a CMake package: it is declared under "dependencies" in mod.json.

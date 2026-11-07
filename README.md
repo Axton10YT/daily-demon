@@ -4,19 +4,27 @@ Geode v6 mod for Geometry Dash 2.2091. Replaces the Map Pack button in the Creat
 
 Ported from [Daily Demon](https://github.com/Axton10YT/daily-demon) (`geode-5-port` branch).
 
-## Server protocol
+## Server
 
-The **Server** setting defaults to the existing Daily Demon server, which uses the same endpoints. The mod calls these endpoints (all under `{server}/`):
+Drop the files from `server/` into the GDPS webroot next to `connection.php`'s site, run `server/setup.sql` once, and create the two config files in `/var/www/ddata`:
+
+```
+php -r 'echo password_hash("YOUR_PIN", PASSWORD_DEFAULT);' > /var/www/ddata/hl_pin.txt
+echo "ACCOUNT_ID ACCOUNT_ID" > /var/www/ddata/hl_ids.txt     # accountIDs allowed to set levels
+```
+
+The **Server** setting defaults to `https://cheesegd.com`. Endpoints (all under `{server}/`):
 
 | Endpoint | Method | Response |
 |---|---|---|
-| `getGJDailyDemon.php[?number=N]` | GET | `periodID\|secondsLeft\|levelID\|number` — `secondsLeft` drives the countdown, so the server decides how long each level lasts. `-1` when nothing is set. |
-| `getGJDDIDs.php` | GET | Any text containing the account/user IDs allowed to set levels (digits separated by anything). |
-| `setGJDDLevel.php` | POST `accountID`, `authtoken`, `levelID` | `1` ok, `-2` not authorised, `-5` auth failed |
-| `requestGJDDAccess.php` | POST `accountID`, `authtoken` | `1` sent, `2` already has access, `3` pending, `-2` declined, `-5` auth failed |
-| `getGJDDList.php` | GET | Comma-separated level IDs of every past Hourly Level (`-1` if none) |
+| `getGJHourlyLevel.php[?number=N]` | GET | `hourID\|secondsLeft\|levelID\|number`, or `-1`. Current level = the one set for this UTC hour, else the latest earlier one. |
+| `getGJHLList.php` | GET | Comma-separated level IDs of every Hourly Level (`-1` if none) |
+| `validateGJHLPIN.php` | POST `pin` | `1` correct, `0` wrong, `2` too many wrong tries from this IP |
+| `setGJHLLevel.php` | POST `pin`, `accountID`, `userID`, `levelID` | `1` ok, `-6` wrong PIN, `-2` account not whitelisted, `-7` userID doesn't match the account, `2` throttled |
 
-`authtoken` comes from [Argon](https://github.com/GlobedGD/argon); the password/GJP is never sent.
+## Setting a level
+
+Open any level page and tap the lock button (bottom right). Enter the PIN; once it is accepted you get a menu to set that level as the Hourly Level. The PIN is remembered until the game closes. The server re-checks the PIN on every set and checks your accountID against `hl_ids.txt`.
 
 ## Building
 
