@@ -536,8 +536,8 @@ class $modify(HLPage, DailyLevelPage) {
 
 	void levelDownloadFailed(int response) {
 		if (m_fields->m_isHL) {
-			log::warn("Hourly Level: level download failed (response {}), wanted level {}", response, g_hlLevelID);
-			Notification::create(fmt::format("Couldn't download the Hourly Level (code {})", response), NotificationIcon::Error)->show();
+			log::warn("Hourly Level: level download failed (arg {}), wanted level {}", response, g_hlLevelID);
+			Notification::create(fmt::format("Level {} couldn't be downloaded - it may be deleted or not exist", g_hlLevelID), NotificationIcon::Error)->show();
 		}
 		DailyLevelPage::levelDownloadFailed(response);
 	}
