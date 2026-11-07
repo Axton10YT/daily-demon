@@ -28,9 +28,8 @@ jobs:
       - name: Build the mod
         uses: geode-sdk/build-geode-mod@main
         with:
-          sdk: nightly
-          bindings: geode-sdk/bindings
-          bindings-ref: main
+          # build against the released SDK + its own bindings so the DLL matches the Geode v6.0.0-alpha.1 loader
+          sdk: latest
           combine: true
           target: ${{ matrix.config.target }}
 
