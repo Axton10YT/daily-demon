@@ -1,12 +1,17 @@
-// Daily Demon - replaces the Versus button in CreatorLayer with a Daily Demon button.
+// Hourly Level - replaces the Map Pack button in CreatorLayer with an Hourly Level button.
 //
 // The popup is the game's own DailyLevelPage opened as the Event type, so it looks and behaves
-// like the Event level popup. While that popup is open ("DD mode") three calls are redirected:
-//   GameLevelManager::getGJDailyLevelState(Event) -> GET {server}/getGJDailyDemon.php  ("dayID|secondsLeft|levelID")
+// like the Event level popup. While that popup is open ("HL mode") three calls are redirected:
+//   GameLevelManager::getGJDailyLevelState(Event) -> GET {server}/getGJHourlyLevel.php  ("hourID|secondsLeft|levelID|number")
 //   GameLevelManager::downloadLevel(<negative id>, .., dailyID) -> downloads the real levelID from the endpoint
 //   DailyLevelPage::levelDownloadFinished          -> tags the level with a daily ID so the node is built
 //
-// Users listed in ids.txt also get a "Set DD" button on level pages that POSTs to setGJDDLevel.php.
+// Users listed by getGJHLIDs.php also get a "Set HL" button on level pages that POSTs to setGJHLLevel.php.
+//
+// Geode v6 port notes:
+//  - needs C++23 and Geode >= 6.0.0-alpha.1 (GD 2.2091)
+//  - gd::string is gone in v6, so nothing here relies on it (the old moderator-popup hook that took
+//    gd::string arguments belonged to Daily Demon and was dropped)
 
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CreatorLayer.hpp>
@@ -23,29 +28,35 @@
 using namespace geode::prelude;
 
 namespace {
-		// Offset keeps our daily ID clear of any real Event IDs stored by the game.
-	constexpr int DD_ID_OFFSET = 700000;
+	// Offset keeps our daily ID clear of any real Event IDs stored by the game (and of Daily Demon's 700000+).
+	constexpr int HL_ID_OFFSET = 900000;
+	constexpr int HOUR = 3600;
 
-	bool g_ddMode = false;
-	int g_ddLevelID = 0;
-	int g_ddDailyID = 0;
-	int g_ddNumber = 0;          // "Daily Demon #N"
-	std::time_t g_ddEndsAt = 0;  // when today's demon expires (unix time)
-	int g_ddDayID = 0;           // UTC day index of the shown demon
-	int g_ddWant = 0;            // >0: browse to this numbered Daily Demon instead of today's
+	bool g_hlMode = false;
+	int g_hlLevelID = 0;
+	int g_hlDailyID = 0;
+	int g_hlNumber = 0;          // "Hourly Level #N"
+	std::time_t g_hlEndsAt = 0;  // when the current hourly level expires (unix time)
+	int g_hlHourID = 0;          // UTC hour index of the shown level
+	int g_hlWant = 0;            // >0: browse to this numbered Hourly Level instead of the current one
 
-	// Geode v5: web requests are futures; a TaskHolder aborts the task when replaced/destroyed
+	// Web requests are futures; a TaskHolder aborts the task when replaced/destroyed
 	// and runs the callback on the main thread.
 	async::TaskHolder<web::WebResponse> g_fetchHolder;
 	async::TaskHolder<web::WebResponse> g_idsHolder;
+	async::TaskHolder<Result<std::string>> g_authHolder;
 
 	// 0 = unknown/loading, 1 = allowed, -1 = not allowed
 	int g_allowed = 0;
 
-	std::string serverURL(std::string const& path) {
+	std::string serverBase() {
 		auto base = Mod::get()->getSettingValue<std::string>("server");
 		while (!base.empty() && base.back() == '/') base.pop_back();
-		return base + "/" + path;
+		return base;
+	}
+
+	std::string serverURL(std::string const& path) {
+		return serverBase() + "/" + path;
 	}
 
 	int myUserID() {
@@ -63,7 +74,6 @@ namespace {
 
 	// Proves account ownership through Argon (no password/GJP is ever sent), then calls cb with the
 	// POST body prefix "accountID=..&authtoken=..". Shows a notification and does nothing on failure.
-	async::TaskHolder<Result<std::string>> g_authHolder;
 	void withAuth(std::function<void(std::string)> cb) {
 		if (!argon::signedIn()) {
 			return Notification::create("Log into your GD account first", NotificationIcon::Error)->show();
@@ -80,8 +90,9 @@ namespace {
 
 	void checkAllowed(std::function<void(bool)> cb) {
 		if (g_allowed != 0) return cb(g_allowed > 0);
+		if (serverBase().empty()) return cb(false);
 		g_idsHolder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(8)).get(serverURL("getGJDDIDs.php")),
+			web::WebRequest().timeout(std::chrono::seconds(8)).get(serverURL("getGJHLIDs.php")),
 			[cb](web::WebResponse res) {
 				bool ok = false;
 				if (res.ok()) {
@@ -108,7 +119,7 @@ namespace {
 	// (so cached Event data never shows up here, and ours never leaks into the real Event button).
 	struct SavedEvent { int id = 0, timeLeft = 0, active = 0; bool has = false; } g_saved;
 
-	void beginDDMode() {
+	void beginHLMode() {
 		auto mgr = GameLevelManager::sharedState();
 		if (!g_saved.has) {
 			g_saved = { mgr->m_eventID, mgr->m_eventTimeLeft, mgr->m_activeEventID, true };
@@ -116,22 +127,21 @@ namespace {
 		mgr->m_eventID = 0;
 		mgr->m_eventTimeLeft = 0;
 		mgr->m_activeEventID = 0;
-		g_ddLevelID = 0;
-		g_ddDailyID = 0;
-		g_ddNumber = 0;
-		g_ddEndsAt = 0;
-		g_ddDayID = 0;
-		g_ddWant = 0;
-		g_ddMode = true;
+		g_hlLevelID = 0;
+		g_hlDailyID = 0;
+		g_hlNumber = 0;
+		g_hlEndsAt = 0;
+		g_hlHourID = 0;
+		g_hlWant = 0;
+		g_hlMode = true;
 	}
 
 	// Entries we put into the manager's daily-level dictionary. They must never survive into the
 	// game's save data, so they are removed when the popup closes and right before every save.
 	std::set<int> g_injected;
 
-	// Removes every trace of our synthetic daily entries from the manager, including ones that an
-	// older build already wrote into the save file (those are loaded back at startup and crash
-	// GameLevelManager::cleanupDailyLevels when it tries to look them up).
+	// Removes every trace of our synthetic daily entries from the manager (anything with a daily ID
+	// at or above our offset, including ones an interrupted session may have left in the save file).
 	void purgeInjected() {
 		auto mgr = GameLevelManager::sharedState();
 		if (!mgr) return;
@@ -155,7 +165,7 @@ namespace {
 						continue;
 					}
 					auto lvl = static_cast<GJGameLevel*>(obj);
-					if (!lvl || lvl->m_dailyID.value() >= DD_ID_OFFSET) {
+					if (!lvl || lvl->m_dailyID.value() >= HL_ID_OFFSET) {
 						if (lvl) lvl->m_dailyID = 0;
 						if (isInt) dict->removeObjectForKey(intKey);
 						else dict->removeObjectForKey(strKey);
@@ -174,17 +184,17 @@ namespace {
 			mgr->m_activeEventID = g_saved.active;
 			g_saved.has = false;
 		}
-		// An Event slot still holding one of our IDs (left in the save by an older build) points at a
-		// level that doesn't exist; reset it so the game never looks it up.
-		if (mgr->m_eventID >= DD_ID_OFFSET || mgr->m_activeEventID >= DD_ID_OFFSET) {
+		// An Event slot still holding one of our IDs points at a level that doesn't exist;
+		// reset it so the game never looks it up.
+		if (mgr->m_eventID >= HL_ID_OFFSET || mgr->m_activeEventID >= HL_ID_OFFSET) {
 			mgr->m_eventID = 0;
 			mgr->m_eventTimeLeft = 0;
 			mgr->m_activeEventID = 0;
 		}
 	}
 
-	void endDDMode() {
-		g_ddMode = false;
+	void endHLMode() {
+		g_hlMode = false;
 		purgeInjected();
 		restoreEventState();
 	}
@@ -199,21 +209,21 @@ namespace {
 	}
 
 	std::string countdownText() {
-		long today = static_cast<long>(std::time(nullptr) / 86400);
-		if (g_ddDayID > 0 && g_ddDayID != today) {
-			std::time_t t = static_cast<std::time_t>(g_ddDayID) * 86400;
+		long thisHour = static_cast<long>(std::time(nullptr) / HOUR);
+		if (g_hlHourID > 0 && g_hlHourID != thisHour) {
+			std::time_t t = static_cast<std::time_t>(g_hlHourID) * HOUR;
 			std::tm tmv{};
 #ifdef _WIN32
 			gmtime_s(&tmv, &t);
 #else
 			gmtime_r(&t, &tmv);
 #endif
-			return fmt::format("{} {:04}-{:02}-{:02}", g_ddDayID > today ? "Scheduled for" : "Daily Demon of",
-				tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+			return fmt::format("{} {:04}-{:02}-{:02} {:02}:00 UTC", g_hlHourID > thisHour ? "Scheduled for" : "Hourly Level of",
+				tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour);
 		}
-		long left = static_cast<long>(g_ddEndsAt - std::time(nullptr));
+		long left = static_cast<long>(g_hlEndsAt - std::time(nullptr));
 		if (left < 0) left = 0;
-		return fmt::format("New Daily Demon in: {:02}:{:02}:{:02}", left / 3600, (left / 60) % 60, left % 60);
+		return fmt::format("New Hourly Level in: {:02}:{:02}", left / 60, left % 60);
 	}
 
 	void collectLabels(CCNode* node, std::vector<CCLabelBMFont*>& out) {
@@ -241,7 +251,7 @@ namespace {
 		}
 	}
 
-	// Event pages carry a reward chest in the bottom centre. Daily Demons have no chest.
+	// Event pages carry a reward chest in the bottom centre. Hourly Levels have no chest.
 	void hideChest(CCNode* node, CCNode* layer) {
 		if (!node || !layer) return;
 		auto size = layer->getContentSize();
@@ -261,7 +271,7 @@ namespace {
 	}
 
 	// The popup is the Event page, so strip/relabel everything that says "Event".
-	void tidyDDPage(CCNode* page, CCNode* layer = nullptr) {
+	void tidyHLPage(CCNode* page, CCNode* layer = nullptr) {
 		std::vector<CCLabelBMFont*> labels;
 		collectLabels(page, labels);
 		if (layer) {
@@ -275,20 +285,20 @@ namespace {
 				float y = lbl->getParent()->convertToWorldSpace(lbl->getPosition()).y;
 				if (y < lowY) { lowY = y; lowest = lbl; }
 			}
-			if (lowest && g_ddDayID > 0) lowest->setString(countdownText().c_str());
+			if (lowest && g_hlHourID > 0) lowest->setString(countdownText().c_str());
 		}
 		for (auto lbl : labels) {
 			std::string t = lbl->getString();
 			std::string l = lower(t);
 			if (startsWith(t, "Event #")) {
-				lbl->setString(fmt::format("Daily Demon #{}", g_ddNumber > 0 ? g_ddNumber : 1).c_str());
+				lbl->setString(fmt::format("Hourly Level #{}", g_hlNumber > 0 ? g_hlNumber : 1).c_str());
 			} else if (startsWith(t, "Current:")) {
 				lbl->setVisible(false);
 			} else if (l == "bonus:") {
 				lbl->setVisible(false);
 				auto wp = lbl->getParent()->convertToWorldSpace(lbl->getPosition());
 				hideNear(page, wp); // the reward chest sits just to the right of the label
-			} else if (l.find("something epic") != std::string::npos || startsWith(t, "New Daily Demon in:")) {
+			} else if (l.find("something epic") != std::string::npos || startsWith(t, "New Hourly Level in:")) {
 				lbl->setString(countdownText().c_str());
 			}
 		}
@@ -296,60 +306,55 @@ namespace {
 
 	void failStatus(GJErrorCode code) {
 		if (code == GJErrorCode::NotFound) {
-			Notification::create("No Daily Demon has been set for today", NotificationIcon::Info)->show();
+			Notification::create("No Hourly Level has been set for this hour", NotificationIcon::Info)->show();
 		} else {
-			Notification::create("Couldn't reach the Daily Demon server", NotificationIcon::Error)->show();
+			Notification::create("Couldn't reach the Hourly Level server", NotificationIcon::Error)->show();
 		}
 		auto mgr = GameLevelManager::sharedState();
 		if (mgr->m_GJDailyLevelDelegate) mgr->m_GJDailyLevelDelegate->dailyStatusFailed(GJTimedLevelType::Event, code);
 	}
 
-	void fetchDailyDemon() {
+	void fetchHourlyLevel() {
 		g_fetchHolder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(g_ddWant > 0 ? fmt::format("getGJDailyDemon.php?number={}", g_ddWant) : std::string("getGJDailyDemon.php"))),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(g_hlWant > 0 ? fmt::format("getGJHourlyLevel.php?number={}", g_hlWant) : std::string("getGJHourlyLevel.php"))),
 			[](web::WebResponse res) {
-				if (!g_ddMode) return;
+				if (!g_hlMode) return;
 				if (!res.ok()) return failStatus(GJErrorCode::GenericError);
 
 				auto body = res.string().unwrapOr("");
 				auto parts = utils::string::split(body, "|");
-				if (parts.size() < 3) return failStatus(GJErrorCode::NotFound); // "-1" = nothing set for today
+				if (parts.size() < 3) return failStatus(GJErrorCode::NotFound); // "-1" = nothing set for this hour
 
-				auto day = utils::numFromString<int>(parts[0]);
+				auto hour = utils::numFromString<int>(parts[0]);
 				auto left = utils::numFromString<int>(parts[1]);
 				auto lvl = utils::numFromString<int>(parts[2]);
-				if (day.isErr() || left.isErr() || lvl.isErr() || lvl.unwrap() <= 0) return failStatus(GJErrorCode::NotFound);
+				if (hour.isErr() || left.isErr() || lvl.isErr() || lvl.unwrap() <= 0) return failStatus(GJErrorCode::NotFound);
 
-				g_ddLevelID = lvl.unwrap();
-				g_ddNumber = 0;
+				g_hlLevelID = lvl.unwrap();
+				g_hlNumber = 0;
 				if (parts.size() >= 4) {
-					if (auto n = utils::numFromString<int>(parts[3]); n.isOk()) g_ddNumber = n.unwrap();
+					if (auto n = utils::numFromString<int>(parts[3]); n.isOk()) g_hlNumber = n.unwrap();
 				}
-				g_ddEndsAt = std::time(nullptr) + left.unwrap();
-				g_ddDayID = day.unwrap();
-				g_ddDailyID = DD_ID_OFFSET + (day.unwrap() % 100000);
+				g_hlEndsAt = std::time(nullptr) + left.unwrap();
+				g_hlHourID = hour.unwrap();
+				g_hlDailyID = HL_ID_OFFSET + (hour.unwrap() % 100000);
 
 				auto mgr = GameLevelManager::sharedState();
-				mgr->storeDailyLevelState(g_ddDailyID, g_ddDayID == static_cast<int>(std::time(nullptr) / 86400) ? left.unwrap() : 86400, GJTimedLevelType::Event);
+				bool isCurrent = g_hlHourID == static_cast<int>(std::time(nullptr) / HOUR);
+				mgr->storeDailyLevelState(g_hlDailyID, isCurrent ? left.unwrap() : HOUR, GJTimedLevelType::Event);
 				if (mgr->m_GJDailyLevelDelegate) mgr->m_GJDailyLevelDelegate->dailyStatusFinished(GJTimedLevelType::Event);
 			}
 		);
 	}
 }
 
-// Clean any leftovers from older builds once the main menu is up (before the game can save).
-class $modify(DDMenu, MenuLayer) {
+// Clean any leftovers once the main menu is up (before the game can save).
+class $modify(HLMenu, MenuLayer) {
 	bool init() {
 		if (!MenuLayer::init()) return false;
-		if (!g_ddMode) {
+		if (!g_hlMode) {
 			purgeInjected();
 			restoreEventState();
-		}
-		// Ask the server for this account's moderator status once per launch (shows a popup if you have it).
-		static bool asked = false;
-		if (!asked && GJAccountManager::get()->m_accountID > 0) {
-			asked = true;
-			GameLevelManager::sharedState()->requestUserAccess();
 		}
 		return true;
 	}
@@ -357,28 +362,28 @@ class $modify(DDMenu, MenuLayer) {
 
 // ---- the popup itself ---------------------------------------------------------------------
 
-class $modify(DDPage, DailyLevelPage) {
+class $modify(HLPage, DailyLevelPage) {
 	struct Fields {
-		bool m_isDD = false;
+		bool m_isHL = false;
 	};
 
 	bool init(GJTimedLevelType type) {
 		if (!DailyLevelPage::init(type)) return false;
-		if (!g_ddMode || type != GJTimedLevelType::Event) return true;
-		m_fields->m_isDD = true;
+		if (!g_hlMode || type != GJTimedLevelType::Event) return true;
+		m_fields->m_isHL = true;
 
-		// Swap the "EVENT" title sprite for the Daily Demon logo.
+		// Swap the "EVENT" title sprite for the Hourly Level logo.
 		auto frame = CCSpriteFrameCache::get()->spriteFrameByName("eventLevelLabel_001.png");
 		if (frame && m_mainLayer) {
 			for (auto child : CCArrayExt<CCNode*>(m_mainLayer->getChildren())) {
 				auto spr = typeinfo_cast<CCSprite*>(child);
 				if (spr && spr->isFrameDisplayed(frame)) {
-					auto logo = CCSprite::create(Mod::get()->expandSpriteName("DD_title.png").c_str());
+					auto logo = CCSprite::create(Mod::get()->expandSpriteName("HL_title.png").c_str());
 					if (logo && m_buttonMenu) {
 						logo->setScale(150.f / logo->getContentSize().width);
-						// Tapping the logo requests permission to set Daily Demons.
-						auto btn = CCMenuItemSpriteExtra::create(logo, this, menu_selector(DDPage::onLogo));
-						btn->setID("dd-logo");
+						// Tapping the logo requests permission to set Hourly Levels.
+						auto btn = CCMenuItemSpriteExtra::create(logo, this, menu_selector(HLPage::onLogo));
+						btn->setID("hl-logo");
 						auto world = spr->getParent()->convertToWorldSpace(spr->getPosition());
 						btn->setPosition(m_buttonMenu->convertToNodeSpace(world));
 						m_buttonMenu->addChild(btn);
@@ -421,34 +426,34 @@ class $modify(DDPage, DailyLevelPage) {
 		return nullptr;
 	}
 
-	// Daily Demons have no reward to claim: swap the Claim button for "Load Next".
+	// Hourly Levels have no reward to claim: swap the Claim button for "Load Next".
 	void swapClaimButton() {
 		auto claim = findClaim(m_dailyNode);
 		if (!claim || !claim->getParent()) return;
 		claim->setVisible(false);
 		claim->setEnabled(false);
-		if (claim->getParent()->getChildByID("dd-next-button")) return;
+		if (claim->getParent()->getChildByID("hl-next-button")) return;
 		auto spr = ButtonSprite::create("Load Next", "goldFont.fnt", "GJ_button_01.png", .7f);
-		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(DDPage::onLoadNext));
-		btn->setID("dd-next-button");
+		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(HLPage::onLoadNext));
+		btn->setID("hl-next-button");
 		btn->setPosition(claim->getPosition());
 		claim->getParent()->addChild(btn);
 	}
 
 	void onLoadNext(CCObject*) {
-		int next = (g_ddNumber > 0 ? g_ddNumber : 1) + 1;
-		Ref<DDPage> self = this;
+		int next = (g_hlNumber > 0 ? g_hlNumber : 1) + 1;
+		Ref<HLPage> self = this;
 		static async::TaskHolder<web::WebResponse> holder;
 		holder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(fmt::format("getGJDailyDemon.php?number={}", next))),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL(fmt::format("getGJHourlyLevel.php?number={}", next))),
 			[self, next](web::WebResponse res) {
 				auto body = res.string().unwrapOr("");
 				if (!res.ok() || utils::string::split(body, "|").size() < 3) {
-					return Notification::create("That's the latest Daily Demon", NotificationIcon::Info)->show();
+					return Notification::create("That's the latest Hourly Level", NotificationIcon::Info)->show();
 				}
 				self->onClose(nullptr);   // restores the real Event state
-				beginDDMode();
-				g_ddWant = next;
+				beginHLMode();
+				g_hlWant = next;
 				DailyLevelPage::create(GJTimedLevelType::Event)->show();
 			}
 		);
@@ -456,27 +461,27 @@ class $modify(DDPage, DailyLevelPage) {
 
 	void createDailyNode(GJGameLevel* level, bool instant, float delay, bool isNew) {
 		DailyLevelPage::createDailyNode(level, instant, delay, isNew);
-		if (m_fields->m_isDD) { tidyDDPage(this, m_mainLayer); swapClaimButton(); }
+		if (m_fields->m_isHL) { tidyHLPage(this, m_mainLayer); swapClaimButton(); }
 	}
 
 	void updateTimers(float dt) {
 		DailyLevelPage::updateTimers(dt);
-		if (m_fields->m_isDD) { tidyDDPage(this, m_mainLayer); swapClaimButton(); }
+		if (m_fields->m_isHL) { tidyHLPage(this, m_mainLayer); swapClaimButton(); }
 	}
 
 	void onClose(CCObject* sender) {
-		if (m_fields->m_isDD) endDDMode();
+		if (m_fields->m_isHL) endHLMode();
 		DailyLevelPage::onClose(sender);
 	}
 
 	void onLogo(CCObject*) {
 		checkAllowed([](bool ok) {
 			if (ok) {
-				return Notification::create("You can already set Daily Demons (use Set DD on a level page)", NotificationIcon::Info)->show();
+				return Notification::create("You can already set Hourly Levels (use Set HL on a level page)", NotificationIcon::Info)->show();
 			}
 			createQuickPopup(
-				"Daily Demon",
-				"Want to be able to <cy>set Daily Demons</c>? Send a request and it will be reviewed.",
+				"Hourly Level",
+				"Want to be able to <cy>set Hourly Levels</c>? Send a request and it will be reviewed.",
 				"Cancel", "Request",
 				[](FLAlertLayer*, bool yes) {
 					if (!yes) return;
@@ -486,7 +491,7 @@ class $modify(DDPage, DailyLevelPage) {
 						req.header("Content-Type", "application/x-www-form-urlencoded");
 						req.bodyString(auth);
 						static async::TaskHolder<web::WebResponse> holder;
-						holder.spawn(req.post(serverURL("requestGJDDAccess.php")), [](web::WebResponse res) {
+						holder.spawn(req.post(serverURL("requestGJHLAccess.php")), [](web::WebResponse res) {
 							auto body = res.string().unwrapOr("");
 							if (res.ok() && body == "1") Notification::create("Request sent!", NotificationIcon::Success)->show();
 							else if (body == "3") Notification::create("Your request is already pending", NotificationIcon::Info)->show();
@@ -502,16 +507,16 @@ class $modify(DDPage, DailyLevelPage) {
 	}
 
 	void onTheSafe(CCObject* sender) {
-		if (!m_fields->m_isDD) return DailyLevelPage::onTheSafe(sender);
-		// The Safe lists every level that was ever a Daily Demon.
-		Ref<DDPage> self = this;
+		if (!m_fields->m_isHL) return DailyLevelPage::onTheSafe(sender);
+		// The Safe lists every level that was ever an Hourly Level.
+		Ref<HLPage> self = this;
 		static async::TaskHolder<web::WebResponse> holder;
 		holder.spawn(
-			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJDDList.php")),
+			web::WebRequest().timeout(std::chrono::seconds(10)).get(serverURL("getGJHLList.php")),
 			[self](web::WebResponse res) {
 				auto body = res.string().unwrapOr("");
 				if (!res.ok() || body.empty() || body == "-1") {
-					return Notification::create("No Daily Demons yet", NotificationIcon::Info)->show();
+					return Notification::create("No Hourly Levels yet", NotificationIcon::Info)->show();
 				}
 				auto search = GJSearchObject::create(SearchType::MapPackOnClick, body);
 				CCDirector::get()->pushScene(CCTransitionFade::create(.5f, LevelBrowserLayer::scene(search)));
@@ -520,45 +525,23 @@ class $modify(DDPage, DailyLevelPage) {
 	}
 
 	void keyBackClicked() {
-		if (m_fields->m_isDD) endDDMode();
+		if (m_fields->m_isHL) endHLMode();
 		DailyLevelPage::keyBackClicked();
 	}
 
 	void levelDownloadFinished(GJGameLevel* level) {
-		if (m_fields->m_isDD && level && g_ddDailyID > 0) {
+		if (m_fields->m_isHL && level && g_hlDailyID > 0) {
 			// The page only builds its node for levels carrying a daily ID.
-			level->m_dailyID = g_ddDailyID;
+			level->m_dailyID = g_hlDailyID;
 			if (auto mgr = GameLevelManager::sharedState(); mgr->m_dailyLevels) {
-				mgr->m_dailyLevels->setObject(level, g_ddDailyID);
+				mgr->m_dailyLevels->setObject(level, g_hlDailyID);
 			}
 		}
 		DailyLevelPage::levelDownloadFinished(level);
 	}
 };
 
-class $modify(DDManager, GameLevelManager) {
-	// The game's own "requestUserAccess" answer: 1 = Moderator, 2 = Elder Moderator, <=0 = none.
-	void onRequestUserAccessCompleted(gd::string response, gd::string tag) {
-		GameLevelManager::onRequestUserAccessCompleted(response, tag);
-		auto lvl = utils::numFromString<int>(std::string(response)).unwrapOr(0);
-		auto mod = Mod::get();
-		if (lvl <= 0) {
-			mod->setSavedValue<int>("shown-mod-level", 0);
-			return;
-		}
-		if (lvl > mod->getSavedValue<int>("shown-mod-level", 0)) {
-			mod->setSavedValue<int>("shown-mod-level", lvl);
-			queueInMainThread([lvl] {
-				FLAlertLayer::create(
-					lvl >= 2 ? "Elder Moderator!" : "Moderator!",
-					lvl >= 2 ? "Congrats! You have got <cy>Geometry Dash Elder Moderator</c>!"
-					         : "Congrats! You have got <cy>Geometry Dash Moderator</c>!",
-					"OK"
-				)->show();
-			});
-		}
-	}
-
+class $modify(HLManager, GameLevelManager) {
 	void encodeDataTo(DS_Dictionary* dict) {
 		// Saving on exit: make sure none of our temporary state is written/cleaned up.
 		purgeInjected();
@@ -572,8 +555,8 @@ class $modify(DDManager, GameLevelManager) {
 	}
 
 	bool getGJDailyLevelState(GJTimedLevelType type) {
-		if (g_ddMode && type == GJTimedLevelType::Event) {
-			fetchDailyDemon();
+		if (g_hlMode && type == GJTimedLevelType::Event) {
+			fetchHourlyLevel();
 			return true;
 		}
 		return GameLevelManager::getGJDailyLevelState(type);
@@ -581,55 +564,55 @@ class $modify(DDManager, GameLevelManager) {
 
 	void downloadLevel(int id, bool gauntlet, int dailyID) {
 		// Daily/weekly/event pages request negative IDs (-1/-2/-3); give them our real level instead.
-		if (g_ddMode && id < 0 && g_ddLevelID > 0) {
-			id = g_ddLevelID;
-			dailyID = g_ddDailyID;
+		if (g_hlMode && id < 0 && g_hlLevelID > 0) {
+			id = g_hlLevelID;
+			dailyID = g_hlDailyID;
 		}
 		GameLevelManager::downloadLevel(id, gauntlet, dailyID);
 	}
 };
 
-// ---- "Set as Daily Demon" button on level pages (whitelisted users only) --------------------
+// ---- "Set as Hourly Level" button on level pages (whitelisted users only) -------------------
 
-class $modify(DDLevelInfo, LevelInfoLayer) {
+class $modify(HLLevelInfo, LevelInfoLayer) {
 	bool init(GJGameLevel* level, bool challenge) {
 		if (!LevelInfoLayer::init(level, challenge)) return false;
 		if (!level || level->m_levelID.value() <= 0) return true;
-		if (level->m_dailyID.value() >= DD_ID_OFFSET) {
+		if (level->m_dailyID.value() >= HL_ID_OFFSET) {
 			std::vector<CCLabelBMFont*> labels;
 			collectLabels(this, labels);
 			for (auto lbl : labels) {
-				if (lower(lbl->getString()).find("(event)") != std::string::npos) lbl->setString("(Daily Demon)");
+				if (lower(lbl->getString()).find("(event)") != std::string::npos) lbl->setString("(Hourly Level)");
 			}
 		}
-		Ref<DDLevelInfo> self = this;
+		Ref<HLLevelInfo> self = this;
 		checkAllowed([self](bool ok) {
 			if (!ok) return;
-			queueInMainThread([self] { self->addDDButton(); });
+			queueInMainThread([self] { self->addHLButton(); });
 		});
 		return true;
 	}
 
-	void addDDButton() {
-		if (!this->getParent() || this->getChildByID("dd-menu")) return;
+	void addHLButton() {
+		if (!this->getParent() || this->getChildByID("hl-menu")) return;
 		auto menu = CCMenu::create();
-		menu->setID("dd-menu");
+		menu->setID("hl-menu");
 		menu->setPosition({0.f, 0.f});
-		auto spr = ButtonSprite::create("Set DD", "goldFont.fnt", "GJ_button_04.png", .6f);
+		auto spr = ButtonSprite::create("Set HL", "goldFont.fnt", "GJ_button_04.png", .6f);
 		spr->setScale(.7f);
-		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(DDLevelInfo::onSetDD));
-		btn->setID("set-daily-demon-button");
+		auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(HLLevelInfo::onSetHL));
+		btn->setID("set-hourly-level-button");
 		auto win = CCDirector::get()->getWinSize();
 		btn->setPosition({win.width - 40.f, 34.f});
 		menu->addChild(btn);
 		this->addChild(menu, 10);
 	}
 
-	void onSetDD(CCObject*) {
+	void onSetHL(CCObject*) {
 		int id = m_level->m_levelID.value();
 		createQuickPopup(
-			"Daily Demon",
-			fmt::format("Set <cy>{}</c> as today's Daily Demon?", std::string(m_level->m_levelName)),
+			"Hourly Level",
+			fmt::format("Set <cy>{}</c> as the current Hourly Level?", std::string(m_level->m_levelName)),
 			"Cancel", "Set",
 			[id](FLAlertLayer*, bool yes) {
 				if (!yes) return;
@@ -639,10 +622,10 @@ class $modify(DDLevelInfo, LevelInfoLayer) {
 					req.header("Content-Type", "application/x-www-form-urlencoded");
 					req.bodyString(fmt::format("{}&levelID={}", auth, id));
 					static async::TaskHolder<web::WebResponse> holder;
-					holder.spawn(req.post(serverURL("setGJDDLevel.php")), [](web::WebResponse res) {
+					holder.spawn(req.post(serverURL("setGJHLLevel.php")), [](web::WebResponse res) {
 						auto body = res.string().unwrapOr("");
 						if (res.ok() && body == "1") {
-							Notification::create("Daily Demon set!", NotificationIcon::Success)->show();
+							Notification::create("Hourly Level set!", NotificationIcon::Success)->show();
 						} else if (body == "-2") {
 							Notification::create("Not authorised", NotificationIcon::Error)->show();
 						} else if (body == "-5") {
@@ -657,58 +640,78 @@ class $modify(DDLevelInfo, LevelInfoLayer) {
 	}
 };
 
-// ---- Versus -> Daily Demon ----------------------------------------------------------------
+// ---- Map Pack -> Hourly Level -------------------------------------------------------------
 
-class $modify(DDCreatorLayer, CreatorLayer) {
+class $modify(HLCreatorLayer, CreatorLayer) {
 	bool init() {
 		if (!CreatorLayer::init()) return false;
-		this->replaceVersusButton();
+		this->replaceMapPackButton();
 		return true;
 	}
 
-	void replaceVersusButton() {
-		auto versusFrame = CCSpriteFrameCache::get()->spriteFrameByName("GJ_versusBtn_001.png");
-		if (!versusFrame) return;
-
+	// Geode's node IDs first, then fall back to hunting for the vanilla sprite frame.
+	CCMenuItemSpriteExtra* findMapPackButton() {
+		if (auto byID = typeinfo_cast<CCMenuItemSpriteExtra*>(this->getChildByIDRecursive("map-packs-button"))) {
+			return byID;
+		}
+		auto frame = CCSpriteFrameCache::get()->spriteFrameByName("GJ_mapPacksBtn_001.png");
+		if (!frame) return nullptr;
 		for (auto node : CCArrayExt<CCNode*>(this->getChildren())) {
 			auto menu = typeinfo_cast<CCMenu*>(node);
 			if (!menu) continue;
 			for (auto item : CCArrayExt<CCNode*>(menu->getChildren())) {
 				auto btn = typeinfo_cast<CCMenuItemSpriteExtra*>(item);
 				if (!btn) continue;
-				auto oldSpr = typeinfo_cast<CCSprite*>(btn->getNormalImage());
-				if (!oldSpr || !oldSpr->isFrameDisplayed(versusFrame)) continue;
-
-				// Build the new sprite: our background + the demon face from the game's own sheet.
-				auto bg = CCSprite::create(Mod::get()->expandSpriteName("DD_btn_001.png").c_str());
-				if (!bg) return;
-				bg->setScale((oldSpr->getContentSize().width * oldSpr->getScale()) / bg->getContentSize().width);
-				auto size = bg->getContentSize();
-				// Plain Easy Demon face. Sized relative to the tile (the tile PNG has no HD/UHD suffix,
-				// so its size in game units is not its pixel size) and kept above the lettering.
-				if (auto face = CCSprite::createWithSpriteFrameName("diffIcon_07_btn_001.png")) {
-					face->setScale(size.width * .58f / face->getContentSize().width);
-					face->setPosition({size.width * .472f, size.height * .53f}); // tile art is 94/199 across; the rest is its drop shadow
-					bg->addChild(face);
-				}
-
-				auto newBtn = CCMenuItemSpriteExtra::create(bg, this, menu_selector(DDCreatorLayer::onDailyDemon));
-				newBtn->setID("daily-demon-button");
-
-				newBtn->setScale(btn->getScale());
-				newBtn->m_baseScale = btn->m_baseScale; // keep the same size as the neighbouring tiles
-				newBtn->setPosition(btn->getPosition());
-				newBtn->setZOrder(btn->getZOrder());
-				menu->addChild(newBtn);
-				btn->removeFromParent();
-				return;
+				auto spr = typeinfo_cast<CCSprite*>(btn->getNormalImage());
+				if (spr && spr->isFrameDisplayed(frame)) return btn;
 			}
 		}
-		log::warn("Versus button not found in CreatorLayer; Daily Demon button not added");
+		return nullptr;
 	}
 
-	void onDailyDemon(CCObject*) {
-		beginDDMode();
+	void replaceMapPackButton() {
+		auto btn = this->findMapPackButton();
+		if (!btn || !btn->getParent()) {
+			log::warn("Map Pack button not found in CreatorLayer; Hourly Level button not added");
+			return;
+		}
+		auto oldImg = btn->getNormalImage();
+
+		// The tile PNG has no HD/UHD suffix, so scale it to the size the old tile had on screen.
+		auto tile = CCSprite::create(Mod::get()->expandSpriteName("HL_btn_001.png").c_str());
+		if (!tile) return;
+		tile->setScale((oldImg->getContentSize().width * oldImg->getScale()) / tile->getContentSize().width);
+
+		// Icon: the game's own clock sprite (the one level cells use for length), so it matches every other
+		// GD icon. If this GD build doesn't have that frame, fall back to the bundled clock.
+		auto size = tile->getContentSize();
+		CCSprite* icon = CCSprite::createWithSpriteFrameName("GJ_timeIcon_001.png");
+		float iconWidth = .5f;
+		if (!icon) {
+			icon = CCSprite::create(Mod::get()->expandSpriteName("HL_clock.png").c_str());
+			iconWidth = .58f;
+		}
+		if (icon) {
+			icon->setScale(size.width * iconWidth / icon->getContentSize().width);
+			icon->setPosition({size.width * .472f, size.height * .53f}); // tile art is 94/199 across; the rest is its drop shadow
+			tile->addChild(icon);
+		}
+
+		auto newBtn = CCMenuItemSpriteExtra::create(tile, this, menu_selector(HLCreatorLayer::onHourlyLevel));
+		newBtn->setID("hourly-level-button");
+		newBtn->setScale(btn->getScale());
+		newBtn->m_baseScale = btn->m_baseScale; // keep the same size as the neighbouring tiles
+		newBtn->setPosition(btn->getPosition());
+		newBtn->setZOrder(btn->getZOrder());
+		btn->getParent()->addChild(newBtn);
+		btn->removeFromParent();
+	}
+
+	void onHourlyLevel(CCObject*) {
+		if (serverBase().empty()) {
+			return Notification::create("Set the Hourly Level server in the mod's settings first", NotificationIcon::Info)->show();
+		}
+		beginHLMode();
 		DailyLevelPage::create(GJTimedLevelType::Event)->show();
 	}
 };

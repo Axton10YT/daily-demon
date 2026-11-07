@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
-set(CMAKE_CXX_STANDARD 20)
+# Geode v5+ needs C++23
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # macOS builds universal; iOS is arm64 only and Geode configures that itself.
 if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -7,7 +8,7 @@ if (NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
 endif()
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
-project(DailyDemon VERSION 1.0.0)
+project(HourlyLevel VERSION 1.0.0)
 
 file(GLOB SOURCES src/*.cpp)
 add_library(${PROJECT_NAME} SHARED ${SOURCES})
@@ -21,5 +22,6 @@ add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 setup_geode_mod(${PROJECT_NAME})
 
 # Argon: GD account auth that never sends the password/GJP to a third party.
+# If this fails to configure against Geode v6, bump to Argon's newest release.
 CPMAddPackage("gh:GlobedGD/argon@1.5.1")
 target_link_libraries(${PROJECT_NAME} argon)

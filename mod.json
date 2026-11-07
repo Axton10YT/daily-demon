@@ -1,15 +1,15 @@
 {
-	"geode": "5.10.1",
+	"geode": "6.0.0-alpha.1",
 	"gd": {
-		"win": "2.2081",
-		"android": "2.2081",
-		"mac": "2.2081",
-		"ios": "2.2081"
+		"win": "2.2091",
+		"android": "2.2091",
+		"mac": "2.2091",
+		"ios": "2.2091"
 	},
 	"version": "v1.0.0",
-	"id": "axton10yt.daily-demon",
-	"name": "Daily Demon",
-	"description": "Replaces the Versus button with a Daily Demon button: a new demon every day in an Event-style popup.",
+	"id": "axton10yt.hourly-level",
+	"name": "Hourly Level",
+	"description": "Replaces the Map Pack button with an Hourly Level button: a new level every hour in an Event-style popup.",
 	"resources": {
 		"sprites": [
 			"resources/*.png"
@@ -19,8 +19,8 @@
 		"server": {
 			"type": "string",
 			"name": "Server",
-			"description": "Base URL of the Daily Demon server.",
-			"default": "https://cheesegd.com",
+			"description": "Base URL of the Hourly Level server (for example https://example.com). Required: the popup stays closed until this is set.",
+			"default": "",
 			"platforms": [
 				"win",
 				"android",
@@ -39,6 +39,6 @@
 		"Axton10YT"
 	],
 	"links": {
-		"source": "https://github.com/Axton10YT/daily-demon"
+		"source": "https://github.com/Axton10YT/hourly-level"
 	}
 }
