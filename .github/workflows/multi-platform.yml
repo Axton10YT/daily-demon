@@ -28,6 +28,21 @@ jobs:
     runs-on: ${{ matrix.config.os }}
     steps:
       - uses: actions/checkout@v4
+      # Argon v2 is a Geode mod that isn't on the index yet: build and install it locally first
+      # so the dependency check and linking for our mod can find it.
+      - name: Checkout Argon v2
+        uses: actions/checkout@v4
+        with:
+          repository: GlobedGD/argon
+          ref: v2
+          path: argon-src
+      - name: Build Argon v2
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          path: argon-src
+          bindings: geode-sdk/bindings
+          bindings-ref: main
+          target: ${{ matrix.config.target }}
       - name: Build the mod
         uses: geode-sdk/build-geode-mod@main
         with:
