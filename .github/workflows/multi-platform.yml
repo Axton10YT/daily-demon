@@ -39,11 +39,13 @@ jobs:
       - name: Patch Argon v2 include order
         shell: bash
         # Upstream bug on the v2 branch: Challenge.hpp calls getArgonServerUrl (Overrides.hpp) without including it.
-        run: sed -i 's|#include "Web.hpp"|#include "Web.hpp"\n#include "Overrides.hpp"|' argon-src/src/Challenge.hpp
+        run: perl -0pi -e 's|#include "Web.hpp"|#include "Web.hpp"\n#include "Overrides.hpp"|' argon-src/src/Challenge.hpp
       - name: Build Argon v2
         uses: geode-sdk/build-geode-mod@main
         with:
           path: argon-src
+          # a different cache tool than our mod build: two sccache servers in one job collide
+          ccache-variant: ccache
           bindings: geode-sdk/bindings
           bindings-ref: main
           target: ${{ matrix.config.target }}
