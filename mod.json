@@ -11,7 +11,7 @@
 	"name": "Hourly Level",
 	"description": "Replaces the Map Pack button with an Hourly Level button: a new level every hour in an Event-style popup.",
 	"dependencies": {
-		"dankmeme.argon": ">=2.0.0"
+		"dankmeme.argon": ">=2.0.0-alpha.1"
 	},
 	"resources": {
 		"sprites": [
