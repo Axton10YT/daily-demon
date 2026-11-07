@@ -518,14 +518,28 @@ class $modify(HLPage, DailyLevelPage) {
 	}
 
 	void levelDownloadFinished(GJGameLevel* level) {
+		if (m_fields->m_isHL) {
+			log::info("Hourly Level: levelDownloadFinished id={} dailyID={} (page wants {}, started={})",
+				level ? level->m_levelID.value() : -1, level ? level->m_dailyID.value() : -1, m_downloadLevelID, m_downloadStarted);
+		}
 		if (m_fields->m_isHL && level && g_hlDailyID > 0) {
-			// The page only builds its node for levels carrying a daily ID.
+			// The page only builds its node for levels carrying a daily ID, and 2.2091 also checks the
+			// level it was waiting for: tell it the real one arrived.
 			level->m_dailyID = g_hlDailyID;
+			m_downloadLevelID = level->m_levelID.value();
 			if (auto mgr = GameLevelManager::sharedState(); mgr->m_dailyLevels) {
 				mgr->m_dailyLevels->setObject(level, g_hlDailyID);
 			}
 		}
 		DailyLevelPage::levelDownloadFinished(level);
+	}
+
+	void levelDownloadFailed(int response) {
+		if (m_fields->m_isHL) {
+			log::warn("Hourly Level: level download failed (response {}), wanted level {}", response, g_hlLevelID);
+			Notification::create(fmt::format("Couldn't download the Hourly Level (code {})", response), NotificationIcon::Error)->show();
+		}
+		DailyLevelPage::levelDownloadFailed(response);
 	}
 };
 
@@ -551,10 +565,15 @@ class $modify(HLManager, GameLevelManager) {
 	}
 
 	void downloadLevel(int id, bool gauntlet, int dailyID) {
-		// Daily/weekly/event pages request negative IDs (-1/-2/-3); give them our real level instead.
-		if (g_hlMode && id < 0 && g_hlLevelID > 0) {
+		// While the popup is open every download it makes should be our real level. 2.2081 asked for the
+		// negative -1/-2/-3 IDs; 2.2091's page tracks its own download ID, so match on any of: a negative
+		// ID, our synthetic daily ID used as the level ID, or our daily ID passed along.
+		if (g_hlMode && g_hlLevelID > 0 && id != g_hlLevelID && (id < 0 || id == g_hlDailyID || dailyID == g_hlDailyID)) {
+			log::info("Hourly Level: redirecting download {} (daily {}) -> level {}", id, dailyID, g_hlLevelID);
 			id = g_hlLevelID;
 			dailyID = g_hlDailyID;
+		} else if (g_hlMode) {
+			log::info("Hourly Level: downloadLevel({}, {}, {}) left alone (level {}, daily {})", id, gauntlet, dailyID, g_hlLevelID, g_hlDailyID);
 		}
 		GameLevelManager::downloadLevel(id, gauntlet, dailyID);
 	}
