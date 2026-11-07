@@ -570,8 +570,9 @@ class $modify(HLManager, GameLevelManager) {
 		// ID, our synthetic daily ID used as the level ID, or our daily ID passed along.
 		if (g_hlMode && g_hlLevelID > 0 && id != g_hlLevelID && (id < 0 || id == g_hlDailyID || dailyID == g_hlDailyID)) {
 			log::info("Hourly Level: redirecting download {} (daily {}) -> level {}", id, dailyID, g_hlLevelID);
+			// plain level download: the fake daily ID is attached in levelDownloadFinished instead
 			id = g_hlLevelID;
-			dailyID = g_hlDailyID;
+			dailyID = 0;
 		} else if (g_hlMode) {
 			log::info("Hourly Level: downloadLevel({}, {}, {}) left alone (level {}, daily {})", id, gauntlet, dailyID, g_hlLevelID, g_hlDailyID);
 		}
