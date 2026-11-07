@@ -36,6 +36,10 @@ jobs:
           repository: GlobedGD/argon
           ref: v2
           path: argon-src
+      - name: Patch Argon v2 include order
+        shell: bash
+        # Upstream bug on the v2 branch: Challenge.hpp calls getArgonServerUrl (Overrides.hpp) without including it.
+        run: sed -i 's|#include "Web.hpp"|#include "Web.hpp"\n#include "Overrides.hpp"|' argon-src/src/Challenge.hpp
       - name: Build Argon v2
         uses: geode-sdk/build-geode-mod@main
         with:
